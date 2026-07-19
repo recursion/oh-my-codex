@@ -416,6 +416,13 @@ describe('omx setup AGENTS refresh behavior', () => {
       assert.match(agentsContent, new RegExp(OMX_MANAGED_AGENTS_END_MARKER));
       assert.match(agentsContent, /<!-- omx:generated:agents-md -->/);
       assert.match(agentsContent, /# oh-my-codex - Intelligent Multi-Agent Orchestration/);
+      assert.match(agentsContent, /adapted role path is unavailable/);
+      assert.match(agentsContent, /cannot apply the requested role TOML model or reasoning effort/);
+      assert.match(agentsContent, /omx ralplan preflight --json/);
+      assert.match(agentsContent, /unsupported_documented_leader_proof/);
+      assert.match(agentsContent, /OMX Team worker/);
+      assert.match(agentsContent, /fork_turns="none"/);
+      assert.match(agentsContent, /never use `fork_turns="all"` or a positive turn count/i);
       assert.equal(existsSync(join(home, '.omx', 'backups', 'setup')), true);
     } finally {
       restoreHome();

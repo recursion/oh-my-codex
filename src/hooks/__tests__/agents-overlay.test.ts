@@ -74,6 +74,8 @@ describe("generateOverlay", () => {
     assert.match(overlay, /omx ralplan preflight --json/i);
     assert.match(overlay, /unsupported_documented_leader_proof/i);
     assert.match(overlay, /never fake the role via a prompt label/i);
+    assert.match(overlay, /set `fork_turns` to `none`/i);
+    assert.match(overlay, /never use `all` or a positive turn count/i);
   });
 
   it("includes the team orchestrator overlay only when orchestration mode is team", async () => {

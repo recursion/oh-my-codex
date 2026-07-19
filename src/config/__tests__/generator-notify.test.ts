@@ -90,6 +90,8 @@ describe('config generator', () => {
       assert.match(toml, /omx ralplan preflight --json/i);
       assert.match(toml, /unsupported_documented_leader_proof/i);
       assert.match(toml, /never fake the role via a prompt label/i);
+      assert.match(toml, /when `spawn_agent` exposes `fork_turns`, set it to `none`/i);
+      assert.match(toml, /never use `all` or a positive turn count/i);
       assert.match(toml, /Treat installed prompts as narrower execution surfaces under AGENTS\.md authority/);
       assert.match(toml, new RegExp(`^developer_instructions = "${OMX_DEVELOPER_INSTRUCTIONS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"$`, 'm'));
     } finally {
