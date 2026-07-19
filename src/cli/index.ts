@@ -149,7 +149,6 @@ import {
   isMsysOrGitBash,
   isNativeWindows,
   isTmuxAvailable,
-  mitigateCopyModeUnderlineArtifacts,
   type HudResizeHookPaneIncarnations,
 } from "../team/tmux-session.js";
 import { getPackageRoot } from "../utils/package.js";
@@ -1426,8 +1425,11 @@ function execTmuxFileSync(
 }
 
 function parseExactTmuxFrame(raw: string): string | null {
-  if (!raw || raw.includes("\r") || !raw.endsWith("\n") || raw.endsWith("\n\n")) return null;
-  return raw.slice(0, -1) || null;
+  if (!raw) return null;
+  const terminator = raw.endsWith("\r\n") ? "\r\n" : raw.endsWith("\n") ? "\n" : null;
+  if (!terminator) return null;
+  const frame = raw.slice(0, -terminator.length);
+  return frame && !frame.includes("\r") && !frame.endsWith("\n") ? frame : null;
 }
 
 function parseExactTmuxScalar(raw: string): string | null {
@@ -1735,46 +1737,34 @@ export function mutateInsideTmuxHudPane(
   }
 }
 
-function buildAtomicTmuxPaneMutationArgs(
-  paneId: string,
-  panePid: string,
-  mutation: string,
-): string[] {
-  return [
-    "if-shell",
-    "-F",
-    "-t",
-    paneId,
-    buildTmuxPaneIncarnationCondition(paneId, panePid),
-    mutation,
-    "",
-  ];
-}
 
-function setDetachedTmuxSessionHistoryLimit(
+export function setDetachedTmuxSessionHistoryLimit(
   sessionIncarnation: string,
   leaderPaneId: string | null | undefined,
   leaderPanePid: string | undefined,
-): void {
+): boolean {
   const canonicalLeaderPaneId = parseCanonicalTmuxPaneId(leaderPaneId);
-  if (!canonicalLeaderPaneId || !isSafeTmuxFormatScalar(sessionIncarnation) || !/^[1-9][0-9]*$/.test(leaderPanePid ?? '')) return;
+  const receipt = randomUUID().replace(/-/g, "");
+  if (
+    !canonicalLeaderPaneId
+    || !isSafeTmuxFormatScalar(sessionIncarnation)
+    || !/^[1-9][0-9]*$/.test(leaderPanePid ?? '')
+    || !/^[a-f0-9]{32}$/.test(receipt)
+  ) return false;
   const exactLeaderPanePid = leaderPanePid!;
   const sessionCondition = buildTmuxPaneIncarnationCondition(canonicalLeaderPaneId, exactLeaderPanePid, sessionIncarnation);
+  const mutationAndReceipt = `set-option -q -t ${sessionIncarnation} history-limit ${DETACHED_TMUX_HISTORY_LIMIT} \\; set-option -pq -t ${canonicalLeaderPaneId} history-limit ${DETACHED_TMUX_HISTORY_LIMIT} \\; display-message -p -t ${canonicalLeaderPaneId} ${receipt}`;
   const mutationArgs = [
     "if-shell", "-F", "-t", canonicalLeaderPaneId, sessionCondition,
-    `set-option -q -t ${sessionIncarnation} history-limit ${DETACHED_TMUX_HISTORY_LIMIT}`,
+    quoteShellArg(mutationAndReceipt),
     "",
   ];
-  const paneMutationArgs = buildAtomicTmuxPaneMutationArgs(
-    canonicalLeaderPaneId,
-    exactLeaderPanePid,
-    `set-option -pq -t ${canonicalLeaderPaneId} history-limit ${DETACHED_TMUX_HISTORY_LIMIT}`,
-  );
   try {
-    execTmuxFileSync(mutationArgs, { stdio: "ignore" });
-    execTmuxFileSync(paneMutationArgs, { stdio: "ignore" });
+    const stdout = execTmuxFileSync(mutationArgs, { encoding: "utf-8" });
+    return parseExactTmuxScalar(stdout) === receipt;
   } catch (err) {
     logCliOperationFailure(err);
+    return false;
   }
 }
 
@@ -2852,6 +2842,7 @@ export function withMadmaxDetachedContextLock<T>(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       mkdirSync(lockPath);
+      const releaseLock = () => rmSync(lockPath, { recursive: true, force: true });
       try {
         const owner: MadmaxDetachedLockOwner = {
           version: 1,
@@ -2861,9 +2852,15 @@ export function withMadmaxDetachedContextLock<T>(
         };
         writeFileSync(join(lockPath, "owner.json"), `${JSON.stringify(owner, null, 2)}\n`, { mode: 0o600 });
         writeFileSync(join(lockPath, "pid"), String(process.pid));
-        return run();
-      } finally {
-        rmSync(lockPath, { recursive: true, force: true });
+        const result = run();
+        if (result instanceof Promise) {
+          return result.finally(releaseLock) as T;
+        }
+        releaseLock();
+        return result;
+      } catch (err) {
+        releaseLock();
+        throw err;
       }
     } catch (err) {
       const code =
@@ -3665,7 +3662,7 @@ export async function launchWithHud(args: string[]): Promise<void> {
     const notifyTempContractRaw = notifyTempResult.contract.active
       ? serializeNotifyTempContract(notifyTempResult.contract)
       : null;
-    const launchResult = runCodex(
+    const launchResult = await runCodex(
       cwd,
       normalizedArgs,
       sessionId,
@@ -4807,14 +4804,6 @@ export function buildDetachedSessionBootstrapSteps(
   ];
   return [
     { name: "new-session", args: newSessionArgs },
-    ...(sessionId
-      ? [
-          {
-            name: "tag-session",
-            args: ["set-option", "-t", sessionName, OMX_INSTANCE_OPTION, sessionId],
-          },
-        ]
-      : []),
     { name: "split-and-capture-hud-pane", args: splitCaptureArgs },
   ];
 }
@@ -5008,6 +4997,37 @@ function captureDetachedSessionAuthority(
   }
 }
 
+
+function setDetachedSessionInstanceTag(
+  sessionName: string,
+  sessionId: string,
+  authority: DetachedSessionAuthority | null,
+): boolean {
+  const receipt = randomUUID().replace(/-/g, "");
+  if (
+    !authority
+    || !isSafeTmuxFormatScalar(sessionName)
+    || !/^[A-Za-z0-9._-]+$/.test(sessionId)
+    || !/^[a-f0-9]{32}$/.test(receipt)
+    || !/^[a-f0-9]{32}$/.test(authority.launchProof)
+    || !/^[1-9][0-9]*$/.test(authority.leaderPanePid)
+  ) return false;
+  const condition = `#{&&:#{==:#{session_name},${sessionName}},#{&&:${buildTmuxPaneIncarnationCondition(authority.leaderPaneId, authority.leaderPanePid, authority.sessionId)},#{==:#{${DETACHED_LAUNCH_PROOF_OPTION}},${authority.launchProof}}}}`;
+  const mutation = `set-option -q -t ${authority.sessionId} ${OMX_INSTANCE_OPTION} ${sessionId} \\; display-message -p -t ${authority.leaderPaneId} ${receipt}`;
+  try {
+    const output = execTmuxFileSync([
+      "if-shell", "-F", "-t", authority.leaderPaneId,
+      condition,
+      quoteShellArg(mutation),
+      "",
+    ], { encoding: "utf-8" });
+    return parseExactTmuxScalar(output) === receipt;
+  } catch (err) {
+    logCliOperationFailure(err);
+    return false;
+  }
+}
+
 function buildRollbackHookCleanupCommand(args: string[]): string | null {
   const [command, formatFlag, targetFlag, target, condition, mutation, fallback] = args;
   if (
@@ -5050,6 +5070,25 @@ export function buildDetachedSessionRollbackSteps(
   return [{
     name: "rollback-detached-session",
     args: ["if-shell", "-F", "-t", authority.leaderPaneId, condition, cleanupCommands.join(" ; "), ""],
+  }];
+}
+
+function buildProvisionalDetachedSessionRollbackSteps(
+  sessionName: string,
+  authority: DetachedSessionAuthority | null,
+): DetachedSessionTmuxStep[] {
+  if (
+    !authority
+    || !isSafeTmuxFormatScalar(sessionName)
+    || !parseCanonicalTmuxPaneId(authority.leaderPaneId)
+    || !/^[1-9][0-9]*$/.test(authority.leaderPanePid)
+    || !isSafeTmuxFormatScalar(authority.sessionId)
+    || !/^[a-f0-9]{32}$/.test(authority.launchProof)
+  ) return [];
+  const condition = `#{&&:#{==:#{session_name},${sessionName}},${buildTmuxPaneIncarnationCondition(authority.leaderPaneId, authority.leaderPanePid, authority.sessionId)}}`;
+  return [{
+    name: "rollback-provisional-detached-session",
+    args: ["if-shell", "-F", "-t", authority.leaderPaneId, condition, `kill-session -t ${sessionName}`, ""],
   }];
 }
 
@@ -5648,7 +5687,7 @@ ${launchAppendix}${dirtyWorktreeGuidance}`
  * runCodex: Launch Codex CLI (blocks until exit).
  * All 3 paths (new tmux, existing tmux, no tmux) block via execSync/execFileSync.
  */
-function runCodex(
+async function runCodex(
   cwd: string,
   args: string[],
   sessionId: string,
@@ -5660,7 +5699,7 @@ function runCodex(
   projectLocalCodexHomeForCleanup?: string,
   runtimeCodexHomeForCleanup?: string,
   runtimeContext?: MadmaxWorktreeRuntimeContext,
-): { postLaunchHandledExternally: boolean } {
+): Promise<{ postLaunchHandledExternally: boolean }> {
   const launchArgs = injectModelInstructionsBypassArgs(
     cwd,
     args,
@@ -5943,7 +5982,7 @@ function runCodex(
       ? buildWindowsPromptCommand("codex", launchArgs)
       : null;
     const sessionName = buildDetachedTmuxSessionName(cwd, sessionId);
-    const launchDetachedSession = (): { postLaunchHandledExternally: boolean } => {
+    const launchDetachedSession = async (): Promise<{ postLaunchHandledExternally: boolean }> => {
       const contextKey = runtimeContext?.madmaxDetachedContext ?? process.env[OMX_MADMAX_DETACHED_CONTEXT_ENV]?.trim();
       const runsRoot = resolveMadmaxRunsRoot(process.env);
       const activeRecordPath = contextKey
@@ -5999,24 +6038,11 @@ function runCodex(
         rmSync(activeRecordPath, { force: true });
       }
 
-      let detachedSessionBindingWrite: Promise<unknown> = Promise.resolve();
-      const writeDetachedSessionBinding = (tmuxPaneId?: string | null) => {
-        detachedSessionBindingWrite = detachedSessionBindingWrite
-          .catch((err) => {
-            logCliOperationFailure(err);
-          })
-          .then(() =>
-            writeSessionStart(cwd, sessionId, {
-              tmuxSessionName: sessionName,
-              ...(tmuxPaneId ? { tmuxPaneId } : {}),
-            }),
-          );
-        void detachedSessionBindingWrite.catch((err) => {
-          logCliOperationFailure(err);
-          // Non-fatal: managed tmux recovery can still use compatibility fallback.
+      const writeDetachedSessionBinding = (tmuxPaneId?: string | null) =>
+        writeSessionStart(cwd, sessionId, {
+          tmuxSessionName: sessionName,
+          ...(tmuxPaneId ? { tmuxPaneId } : {}),
         });
-      };
-      writeDetachedSessionBinding();
       let createdDetachedSession = false;
       let registeredHookTarget: string | null = null;
       let registeredHookName: string | null = null;
@@ -6025,6 +6051,7 @@ function runCodex(
       let detachedLeaderPaneId: string | null = null;
       let registeredHookIncarnations: HudResizeHookPaneIncarnations | undefined;
       let detachedSessionAuthority: DetachedSessionAuthority | null = null;
+      let provisionalDetachedSessionAuthority: DetachedSessionAuthority | null = null;
       const detachedLaunchProof = randomUUID().replace(/-/g, "");
       try {
         // This path is the user-shell interactive launch: OMX creates a tmux
@@ -6073,12 +6100,16 @@ function runCodex(
             if (!provisionalAuthority) {
               throw new Error("detached leader session creation receipt unavailable");
             }
-            detachedSessionAuthority = provisionalAuthority;
+            provisionalDetachedSessionAuthority = provisionalAuthority;
             detachedLeaderPaneId = provisionalAuthority.leaderPaneId;
             const authority = captureDetachedSessionAuthority(provisionalAuthority);
             if (!authority) throw new Error("detached leader session authority unavailable");
             detachedSessionAuthority = authority;
             detachedLeaderPaneId = authority.leaderPaneId;
+            if (!setDetachedSessionInstanceTag(sessionName, sessionId, authority)) {
+              throw new Error("detached session instance tag receipt unavailable");
+            }
+            await writeDetachedSessionBinding(authority.leaderPaneId);
             setDetachedTmuxSessionHistoryLimit(authority.sessionId, authority.leaderPaneId, authority.leaderPanePid);
             if (activeRecordPath && contextKey) {
               writeMadmaxDetachedActiveRecord(activeRecordPath, {
@@ -6095,7 +6126,6 @@ function runCodex(
                 tmux_pane_pid: authority.leaderPanePid,
               });
             }
-            writeDetachedSessionBinding(authority.leaderPaneId);
           }
           if (step.name === "split-and-capture-hud-pane") {
             const hudPaneId = parsePaneIdFromTmuxOutput(output || "");
@@ -6151,14 +6181,7 @@ function runCodex(
               );
             }
             for (const finalizeStep of finalizeSteps) {
-              if (finalizeStep.name === "sanitize-copy-mode-style") {
-                try {
-                  mitigateCopyModeUnderlineArtifacts(sessionName);
-                } catch (err) {
-                  logCliOperationFailure(err);
-                }
-                continue;
-              }
+              if (finalizeStep.name === "sanitize-copy-mode-style") continue;
               const stdio =
                 finalizeStep.name === "attach-session" ? "inherit" : "ignore";
               try {
@@ -6224,13 +6247,18 @@ function runCodex(
               registeredHookIncarnations.hudPaneId,
               registeredHookIncarnations.hudPanePid,
             );
-          const rollbackSteps = buildDetachedSessionRollbackSteps(
-            sessionName,
-            detachedSessionAuthority,
-            retainedHookAuthority ? registeredHookTarget : null,
-            retainedHookAuthority ? registeredHookName : null,
-            retainedHookAuthority ? registeredClientAttachedHookName : null,
-          );
+          const rollbackSteps = detachedSessionAuthority
+            ? buildDetachedSessionRollbackSteps(
+              sessionName,
+              detachedSessionAuthority,
+              retainedHookAuthority ? registeredHookTarget : null,
+              retainedHookAuthority ? registeredHookName : null,
+              retainedHookAuthority ? registeredClientAttachedHookName : null,
+            )
+            : buildProvisionalDetachedSessionRollbackSteps(
+              sessionName,
+              provisionalDetachedSessionAuthority,
+            );
           for (const rollbackStep of rollbackSteps) {
             try {
               execTmuxFileSync(rollbackStep.args, { stdio: "ignore" });
@@ -6248,9 +6276,9 @@ function runCodex(
     const runsRoot = resolveMadmaxRunsRoot(process.env);
     try {
       if (isMadmaxDetachedGuardEnabled(process.env) && contextKey) {
-        return withMadmaxDetachedContextLock(runsRoot, contextKey, launchDetachedSession);
+        return await withMadmaxDetachedContextLock(runsRoot, contextKey, launchDetachedSession);
       }
-      return launchDetachedSession();
+      return await launchDetachedSession();
     } catch (err) {
       if (err instanceof MadmaxDetachedReuseError || err instanceof MadmaxDetachedGuardError) {
         throw err;

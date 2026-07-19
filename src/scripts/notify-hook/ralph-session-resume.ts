@@ -1,7 +1,7 @@
 import { existsSync } from 'fs';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
-import { captureTmuxPaneFromEnv } from '../../state/mode-state-context.js';
+import { captureRalphExpectedAuthority, captureTmuxPaneFromEnv } from '../../state/mode-state-context.js';
 import { resolveCodexPane } from '../tmux-hook-engine.js';
 import { safeString } from './utils.js';
 import type { PromptMutationAuthorization } from '../../hooks/prompt-session-provenance.js';
@@ -221,12 +221,26 @@ function resolveResumePane(env: NodeJS.ProcessEnv = process.env): string {
 
 function bindCurrentPane(state: Record<string, unknown>, nowIso: string, env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
   const paneId = resolveResumePane(env);
-  if (!paneId) return state;
-
+  const next = { ...state };
+  const authority = paneId ? captureRalphExpectedAuthority(paneId) : null;
+  if (!authority) {
+    delete next.tmux_pane_id;
+    delete next.tmux_pane_pid;
+    delete next.tmux_session_name;
+    delete next.tmux_pane_owner_id;
+    delete next.ralph_expected_authority;
+    delete next.tmux_pane_set_at;
+    delete next.tmux_window_id;
+    return next;
+  }
   return {
-    ...state,
-    tmux_pane_id: paneId,
+    ...next,
+    tmux_pane_id: authority.pane_id,
+    tmux_pane_pid: authority.pane_pid,
+    tmux_session_name: authority.session_name,
+    tmux_pane_owner_id: authority.pane_owner_id,
     tmux_pane_set_at: nowIso,
+    ralph_expected_authority: authority,
   };
 }
 
@@ -354,12 +368,12 @@ export async function reconcileRalphSessionResume({
         delete updated.owner_codex_thread_id;
         changed = true;
       }
-      const currentPaneId = resolveResumePane(env);
-      const currentStatePaneId = safeString(updated.tmux_pane_id).trim();
-      if (currentPaneId && currentPaneId !== currentStatePaneId) {
-        Object.assign(updated, bindCurrentPane(updated, nowIso, env));
-        changed = true;
+      const rebound = bindCurrentPane(updated, nowIso, env);
+      for (const key of ['tmux_pane_id', 'tmux_pane_pid', 'tmux_session_name', 'tmux_pane_owner_id', 'tmux_pane_set_at', 'tmux_window_id', 'ralph_expected_authority']) {
+        delete updated[key];
       }
+      Object.assign(updated, rebound);
+      changed = true;
       if (changed) {
         await writeJsonAtomic(currentRalphPath, updated);
       }

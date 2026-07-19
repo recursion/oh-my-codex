@@ -253,6 +253,31 @@ export function tagPaneTeamOwner(paneTarget: string, teamOwnerId: string): void 
   }
 }
 
+/** Atomically tags an exact live pane incarnation with Team ownership. */
+export function tagPaneTeamOwnerIfCurrent(
+  paneTarget: string,
+  expectedPanePid: string,
+  sessionId: string,
+  teamOwnerId: string,
+): boolean {
+  const target = parseCanonicalTmuxPaneId(paneTarget);
+  const owner = teamOwnerId.trim();
+  if (
+    !target
+    || target !== paneTarget
+    || !/^[1-9][0-9]*$/.test(expectedPanePid)
+    || !isSafeTmuxFormatOperand(sessionId)
+    || !isSafeTmuxFormatOperand(owner)
+  ) return false;
+  const receipt = createMutationReceipt();
+  const result = runTmux([
+    'if-shell', '-t', target, '-F', buildTeamPaneMutationCondition(target, expectedPanePid, sessionId),
+    `set-option -p -t ${target} ${OMX_TEAM_PANE_OWNER_OPTION} ${owner} \\; display-message -p ${receipt}`,
+    '',
+  ]);
+  return result.ok && parseExactTmuxAuthorityScalar(result.stdout) === receipt;
+}
+
 
 export function mitigateCopyModeUnderlineArtifacts(sessionTarget: string): boolean {
   const normalizedTarget = sessionTarget.trim();

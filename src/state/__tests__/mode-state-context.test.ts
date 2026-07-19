@@ -44,19 +44,38 @@ describe('withModeRuntimeContext', () => {
     const tmuxPath = join(fakeBinDir, 'tmux');
     const originalPath = process.env.PATH;
     try {
-      await writeFile(tmuxPath, `#!/bin/sh
+      await writeFile(tmuxPath, `#!/usr/bin/env bash
 printf '%s\n' "$*" >> '${tmuxPath}.log'
 case "$1" in
-  list-panes) printf '%%7\\t0\\t4242\\n' ;;
-  set-option)
-    [ "$5" = '@omx_ralph_pane_owner_id' ] || exit 2
-    printf '%s' "$6" > '${tmuxPath}.ralph-owner'
+  list-panes) printf '%%7\t0\t4242\n' ;;
+  if-shell)
+    [ "\${2:-}" = '-t' ] && [ "\${3:-}" = '%7' ] && [ "\${4:-}" = '-F' ] || exit 1
+    condition="\${5:-}"
+    mutation="\${6:-}"
+    case "\$condition" in
+      *'#{pane_id},%7'*'#{pane_dead},0'*'#{pane_pid},4242'*'#{session_name},ralph-session'*'#{@omx_pane_instance_id},instance-7'*) ;;
+      *) exit 1 ;;
+    esac
+    owner="\${mutation##*@omx_ralph_pane_owner_id }"
+    owner="\${owner%%;*}"
+    receipt="\${mutation##*display-message -p }"
+    receipt="\${receipt%% *}"
+    [[ "\$owner" =~ ^ralph:[a-f0-9-]{36}$ && "\$receipt" =~ ^[a-f0-9]{32}$ ]] || exit 1
+    printf '%s' "\$owner" > '${tmuxPath}.ralph-owner'
+    printf '%s\n' "\$receipt"
     ;;
   show-option)
-    [ "$6" = '@omx_ralph_pane_owner_id' ] || exit 3
+    [ "\${5:-}" = '%7' ] || exit 3
+    [ "\${6:-}" = '@omx_ralph_pane_owner_id' ] || exit 3
     cat '${tmuxPath}.ralph-owner'
+    printf '\n'
     ;;
-  display-message) printf 'ralph-session\\n' ;;
+  display-message)
+    case "$*" in
+      *'#{pane_id}'*) printf '%%7\t0\t4242\tralph-session\tinstance-7\n' ;;
+      *) printf 'ralph-session\n' ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 `);
@@ -72,6 +91,14 @@ esac
       assert.equal(out.tmux_pane_pid, 4242);
       assert.equal(out.tmux_session_name, 'ralph-session');
       assert.match(String(out.tmux_pane_owner_id), /^ralph:[0-9a-f-]+$/);
+      assert.deepEqual(out.ralph_expected_authority, {
+        pane_id: '%7',
+        pane_pid: 4242,
+        session_name: 'ralph-session',
+        pane_instance_id: 'instance-7',
+        pane_owner_id: out.tmux_pane_owner_id,
+      });
+      assert.match(await readFile(`${tmuxPath}.log`, 'utf8'), /if-shell -t %7 -F .*display-message -p [a-f0-9]{32}/);
       assert.doesNotMatch(await readFile(`${tmuxPath}.log`, 'utf8'), /@omx_team_pane_owner_id/);
     } finally {
       if (originalPath === undefined) delete process.env.PATH;

@@ -502,6 +502,8 @@ const splitState = cache + '-splits';
 const splitStartState = cache + '-split-starts';
 const optionState = cache + '-options';
 const paneOptionState = cache + '-pane-options';
+const sessionState = cache + '-sessions';
+
 const log = ${JSON.stringify(tmuxLogPath)};
 const args = process.argv.slice(2);
 const detailedFormat = '#{pane_id}\\t#{pane_current_command}\\t#{pane_start_command}';
@@ -606,7 +608,16 @@ const parseTmuxCommand = (command) => {
   let quote = '';
   let escaped = false;
   for (const char of command) {
-    if (escaped) { word += char; escaped = false; continue; }
+    if (escaped) {
+      if (char === ';' && !quote) {
+        if (word) { words.push(word); word = ''; }
+        words.push(';');
+      } else {
+        word += char;
+      }
+      escaped = false;
+      continue;
+    }
     if (char === String.fromCharCode(92)) { escaped = true; continue; }
     if (quote) {
       if (char === quote) quote = '';
@@ -616,6 +627,11 @@ const parseTmuxCommand = (command) => {
     if (char === "'" || char === '"') { quote = char; continue; }
     if (/\\s/.test(char)) {
       if (word) { words.push(word); word = ''; }
+      continue;
+    }
+    if (char === ';') {
+      if (word) { words.push(word); word = ''; }
+      words.push(';');
       continue;
     }
     word += char;
@@ -635,12 +651,23 @@ const authoritativePane = (paneId) => {
     const [id, dead, pid] = row.split(' ');
     return { id, dead, pid };
   }
+  const global = spawnSync(real, ['list-panes', '-a', '-F', livenessFormat], { encoding: 'utf8', env: process.env });
+  const globalRow = String(global.stdout || '').split('\\n').filter(Boolean)
+    .find((candidate) => {
+      const [id, dead, pid] = candidate.split(' ');
+      return id === paneId && (dead === '0' || dead === '1') && /^[1-9][0-9]*$/.test(pid ?? '');
+    });
+  if (globalRow) {
+    const [id, dead, pid] = globalRow.split(' ');
+    return { id, dead, pid };
+  }
   const detailed = spawnSync(real, ['list-panes', '-t', 'leader:0', '-F', detailedFormat], { encoding: 'utf8', env: process.env });
   const paneIds = appendMissingPaneIds(String(detailed.stdout || '').split('\\n').filter(Boolean)
     .map((candidate) => candidate.split(/[\\t\\x1f]/, 1)[0].trim())
     .filter((id) => canonicalPaneId.test(id)));
   const index = paneIds.indexOf(paneId);
   if (index < 0) return null;
+  if (readSplitIds().includes(paneId)) return { id: paneId, dead: '0', pid: String(index + 1) };
   const deadProbe = spawnSync(real, ['list-panes', '-t', paneId, '-F', '#{pane_dead}'], { encoding: 'utf8', env: process.env });
   const pidProbe = spawnSync(real, ['list-panes', '-t', paneId, '-F', '#{pane_pid}'], { encoding: 'utf8', env: process.env });
   const dead = String(deadProbe.stdout || '').trim();
@@ -651,38 +678,106 @@ const authoritativePane = (paneId) => {
     pid: /^[1-9][0-9]*$/.test(pid) ? pid : String(index + 1),
   };
 };
-if (args[0] === 'if-shell' && args[1] === '-F') {
-  appendFileSync(log, args.join(' ') + '\\n');
-  const targetIndex = args.indexOf('-t');
-  const conditionIndex = targetIndex >= 0 ? targetIndex + 2 : 2;
-  const condition = args[conditionIndex] ?? '';
-  const success = args[conditionIndex + 1] ?? '';
-  const rejected = args[conditionIndex + 2] ?? '';
-  const expectedId = condition.match(/#\\{==:#\\{pane_id\\},([^}]+)\\}/)?.[1];
-  const expectedPid = condition.match(/#\\{==:#\\{pane_pid\\},([^}]+)\\}/)?.[1];
-  const accepted = Boolean(expectedId && expectedPid && condition.includes('#{==:#{pane_dead},0}'));
-  const branch = accepted ? success : rejected;
-  const mutationReceipt = success.match(/display-message -p (__OMX_(?:PANE_MUTATION|SEND_AUTHORITY)_[a-f0-9]+__)/)?.[1];
-  if (accepted && mutationReceipt) {
-    const mutationBranch = success.replace(/\\\\?;?\\s*display-message -p __OMX_(?:PANE_MUTATION|SEND_AUTHORITY)_[a-f0-9]+__\\s*$/, '').trim();
-    const mutationArgs = parseTmuxCommand(mutationBranch);
-    if (mutationArgs.length > 0) {
-      const mutation = spawnSync(real, mutationArgs, { encoding: 'utf8', env: process.env });
-      if (mutation.stdout) process.stdout.write(mutation.stdout);
-      if (mutation.stderr) process.stderr.write(mutation.stderr);
-      if (mutation.status !== 0) process.exit(mutation.status ?? 1);
-    }
-    process.stdout.write(mutationReceipt + '\\n');
-    process.exit(0);
+const sessionIdFor = (paneId) => {
+  const persisted = existsSync(sessionState)
+    ? readFileSync(sessionState, 'utf8').split('\\n').filter(Boolean).map((row) => row.split('\\t', 2)).find(([id]) => id === paneId)
+    : undefined;
+  if (persisted?.[1] && /^\\$[0-9]+$/.test(persisted[1])) return persisted[1];
+  const direct = spawnSync(real, ['display-message', '-p', '-t', paneId, '#{session_id}'], { encoding: 'utf8', env: process.env });
+  const sessionId = /^\\$[0-9]+\\n$/.test(String(direct.stdout || '')) ? String(direct.stdout).trim() : '$1';
+  appendFileSync(sessionState, paneId + '\\t' + sessionId + '\\n');
+  return sessionId;
+};
+const paneOptionFor = (paneId, option) => {
+  const persisted = existsSync(paneOptionState)
+    ? readFileSync(paneOptionState, 'utf8').split('\\n').filter(Boolean).reverse().map((row) => row.split('\\t')).find(([id, name]) => id === paneId && name === option)?.[2]
+    : undefined;
+  if (persisted !== undefined) return persisted;
+  const direct = spawnSync(real, ['show-option', '-qv', '-p', '-t', paneId, option], { encoding: 'utf8', env: process.env });
+  if (direct.status !== 0 || direct.error) return undefined;
+  const value = String(direct.stdout || '');
+  return value.endsWith('\\n') ? value.slice(0, -1) : value;
+};
+const globalOptionFor = (option) => existsSync(optionState)
+  ? readFileSync(optionState, 'utf8').split('\\n').filter(Boolean).reverse().map((row) => row.split('\\t')).find(([name]) => name === option)?.[1]
+  : undefined;
+const paneStartCommandFor = (paneId) => {
+  const stored = existsSync(splitStartState)
+    ? readFileSync(splitStartState, 'utf8').split('\\n').filter(Boolean).map((row) => row.split('\\t', 2)).find(([id]) => id === paneId)?.[1]
+    : undefined;
+  if (stored !== undefined) return stored;
+  const direct = spawnSync(real, ['list-panes', '-a', '-F', startCommandFormat], { encoding: 'utf8', env: process.env });
+  const row = String(direct.stdout || '').split('\\n').filter(Boolean).find((candidate) => candidate.startsWith(paneId + '\\t'));
+  return row?.slice(paneId.length + 1) ?? '';
+};
+const executeTmuxCommand = (command) => {
+  const words = parseTmuxCommand(command);
+  const commands = [];
+  let current = [];
+  for (const word of words) {
+    if (word === ';') { if (current.length) commands.push(current); current = []; }
+    else current.push(word);
   }
+  if (current.length) commands.push(current);
+  let stdout = '';
+  for (const commandArgs of commands) {
+    const receipt = commandArgs[0] === 'display-message' && commandArgs[1] === '-p'
+      && /^__OMX_(?:PANE_MUTATION|SEND_AUTHORITY)_[a-f0-9]+__$/.test(commandArgs[2] || '')
+      ? commandArgs[2]
+      : null;
+    if (receipt) { stdout += receipt + '\\n'; continue; }
+    const result = spawnSync(process.execPath, [process.argv[1], ...commandArgs], { encoding: 'utf8', env: process.env });
+    if (result.stderr) process.stderr.write(result.stderr);
+    if (result.status !== 0 || result.error) return { status: result.status ?? 1, stdout };
+    stdout += String(result.stdout || '');
+  }
+  return { status: 0, stdout };
+};
+const evaluatePaneCondition = (condition, targetPaneId) => {
+  const comparisons = [...condition.matchAll(/#\\{==:#\\{(pane_id|pane_dead|pane_pid|session_id|@[A-Za-z0-9_]+)\\},([^}]+)\\}/g)];
+  const expectedPaneId = comparisons.find(([, field]) => field === 'pane_id')?.[2] ?? targetPaneId;
+  if (!canonicalPaneId.test(expectedPaneId || '') || (targetPaneId && targetPaneId !== expectedPaneId)) return false;
+  const pane = authoritativePane(expectedPaneId);
+  if (!pane) return false;
+  const values = {
+    pane_id: pane.id,
+    pane_dead: pane.dead,
+    pane_pid: pane.pid,
+    session_id: sessionIdFor(expectedPaneId),
+  };
+  const comparisonsMatch = comparisons.length > 0 && comparisons.every(([, field, expected]) => (
+    field.startsWith('@')
+      ? (paneOptionFor(expectedPaneId, field) ?? globalOptionFor(field)) === expected
+      : values[field] === expected
+  ));
+  const markersMatch = [...condition.matchAll(/#\\{m:\\*([^*]+)\\*,#\\{pane_start_command\\}\\}/g)]
+    .every(([, marker]) => {
+      const startCommand = paneStartCommandFor(expectedPaneId);
+      const posixMarker = "OMX_TMUX_SPLIT_OPERATION_MARKER='" + marker + "'";
+      const powerShellMarker = "$env:OMX_TMUX_SPLIT_OPERATION_MARKER = '" + marker + "'";
+      return startCommand === posixMarker
+        || startCommand.startsWith(posixMarker + ';')
+        || startCommand === powerShellMarker
+        || startCommand.startsWith(powerShellMarker + ';');
+    });
+  return comparisonsMatch && markersMatch;
+};
+
+if (args[0] === 'if-shell' && args.includes('-F')) {
+  appendFileSync(log, args.join(' ') + '\\n');
+  const formatIndex = args.indexOf('-F');
+  const targetIndex = args.indexOf('-t');
+  const targetPaneId = targetIndex >= 0 ? args[targetIndex + 1] : undefined;
+  const condition = args[formatIndex + 1] ?? '';
+  const success = args[formatIndex + 2] ?? '';
+  const rejected = args[formatIndex + 3] ?? '';
+  const branch = evaluatePaneCondition(condition, targetPaneId) ? success : rejected;
   if (!branch) process.exit(0);
-  const branchArgs = parseTmuxCommand(branch);
-  if (branchArgs.length === 0) process.exit(0);
-  const result = spawnSync(real, branchArgs, { encoding: 'utf8', env: process.env });
+  const result = executeTmuxCommand(branch);
   if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-  process.exit(result.status ?? 1);
+  process.exit(result.status);
 }
+
 if (args[0] === 'set-option' && args[1] === '-g' && /^@omx_(?:split_(?:owner_nonce|rollback)|hud_adopt_owner_nonce)_/.test(args[2] || '')) {
   appendFileSync(log, args.join(' ') + '\\n');
   appendFileSync(optionState, [args[2], args[3]].join('\\t') + '\\n');
@@ -697,6 +792,13 @@ if (args[0] === 'show-options' && args[1] === '-g' && args[2] === '-v' && /^@omx
   if (!match) process.exit(1);
   process.stdout.write(match[1] + '\\n');
   process.exit(0);
+}
+if (args[0] === 'set-option' && args[1] === '-g' && args[2] && args[3] !== undefined) {
+  const result = spawnSync(real, args, { encoding: 'utf8', env: process.env });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.status === 0) appendFileSync(optionState, [args[2], args[3]].join('\\t') + '\\n');
+  process.exit(result.status ?? 1);
 }
 if (args[0] === 'set-option' && args[1] === '-p' && args[2] === '-t' && canonicalPaneId.test(args[3] || '') && args[4]) {
   const result = spawnSync(real, args, { encoding: 'utf8', env: process.env });
@@ -721,10 +823,7 @@ if ((args[0] === 'show-option' || args[0] === 'show-options') && args[1] === '-q
 }
 if (args[0] === 'display-message' && args[1] === '-p' && args[2] === '-t' && canonicalPaneId.test(args[3] || '') && args[4] === '#{session_id}') {
   appendFileSync(log, args.join(' ') + '\\n');
-  const direct = spawnSync(real, args, { encoding: 'utf8', env: process.env });
-  const framed = String(direct.stdout || '');
-  if (direct.status === 0 && /^\\$[0-9]+\\n$/.test(framed)) process.stdout.write(framed);
-  else process.stdout.write('$1\\n');
+  process.stdout.write(sessionIdFor(args[3]) + '\\n');
   process.exit(0);
 }
 if (isIdOnly) {

@@ -26,7 +26,7 @@ import {
   writeWorkerStartupScriptCommand,
   resolveTeamWorkerCliForResolvedLaunchArgs,
   assertTeamWorkerCliPolicyCompatibility,
-  tagPaneTeamOwner,
+  tagPaneTeamOwnerIfCurrent,
   isNativeWindows,
   type TeamWorkerCli,
 } from './tmux-session.js';
@@ -1195,7 +1195,13 @@ export async function scaleUp(
             worktreePath: workerWorkspace?.worktreePath,
           });
         }
-        tagPaneTeamOwner(paneId, teamPaneOwnerId);
+        if (!tagPaneTeamOwnerIfCurrent(paneId, provisionalAuthority.panePid, provisionalAuthority.sessionId, teamPaneOwnerId)) {
+          return await rollbackScaleUp(`Failed to atomically tag tmux pane ownership for ${workerName}`, {
+            paneId,
+            workerName,
+            worktreePath: workerWorkspace?.worktreePath,
+          });
+        }
         provisionalAuthority.ownerTagged = true;
       } catch (error) {
         return await rollbackScaleUp(

@@ -67,18 +67,15 @@ export function parseCanonicalTmuxPaneId(value: string | null | undefined): stri
 
 /**
  * Parses tmux output used as authority. Authority frames are deliberately
- * transport-strict: a nonempty body followed by exactly one LF, with no CR.
+ * transport-strict: a nonempty body followed by exactly one LF or CRLF.
  */
 export function parseExactTmuxAuthorityLines(output: string): string[] | null {
-  if (
-    typeof output !== 'string'
-    || output.length < 2
-    || output.includes('\r')
-    || !output.endsWith('\n')
-    || output.endsWith('\n\n')
-  ) return null;
-  const body = output.slice(0, -1);
-  return body === '' ? null : body.split('\n');
+  if (typeof output !== 'string' || output.length < 2) return null;
+  const terminator = output.endsWith('\r\n') ? '\r\n' : output.endsWith('\n') ? '\n' : null;
+  if (!terminator) return null;
+  const body = output.slice(0, -terminator.length);
+  if (body === '' || body.endsWith('\n') || body.includes('\r')) return null;
+  return body.split('\n');
 }
 
 /** Parses one exact, nonempty tmux authority scalar. */

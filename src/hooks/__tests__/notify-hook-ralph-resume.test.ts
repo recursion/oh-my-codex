@@ -73,14 +73,44 @@ case "$cmd" in
       '#S') echo "${sessionName}" ;;
       '#{pane_in_mode}') echo "0" ;;
       '#{pane_current_path}') echo "${cwd}" ;;
+      *'#{pane_id}'*) printf '%s\t0\t4242\t%s\tinstance-1\r\n' "${currentPaneId}" "${sessionName}" ;;
       *) echo "bad display format: $format" >&2; exit 1 ;;
     esac
     ;;
   list-panes)
-    echo "${currentPaneId}\t1\tcodex\tcodex"
+    if [[ "$1" == '-a' && "$2" == '-F' && "$3" == $'#{pane_id}\t#{pane_dead}\t#{pane_pid}' && $# -eq 3 ]]; then
+      printf '%s\t0\t4242\n' "${currentPaneId}"
+    elif [[ "$*" == *'-a'* ]]; then
+      printf '%s\t0\t4242\n' "${currentPaneId}"
+    else
+      echo "${currentPaneId}\t1\tcodex\tcodex"
+    fi
+    ;;
+  if-shell)
+    [ "\${1:-}" = '-t' ] && [ "\${2:-}" = "${currentPaneId}" ] && [ "\${3:-}" = '-F' ] || exit 1
+    condition="\${4:-}"
+    mutation="\${5:-}"
+    case "\$condition" in
+      *"#{pane_id},${currentPaneId}"*'#{pane_dead},0'*'#{pane_pid},4242'*"#{session_name},${sessionName}"*'#{@omx_pane_instance_id},instance-1'*) ;;
+      *) echo "invalid Ralph authority predicate" >&2; exit 1 ;;
+    esac
+    owner="\${mutation##*@omx_ralph_pane_owner_id }"
+    owner="\${owner%%;*}"
+    receipt="\${mutation##*display-message -p }"
+    receipt="\${receipt%% *}"
+    if [[ ! "\$owner" =~ ^ralph:[a-f0-9-]{36}$ || ! "\$receipt" =~ ^[a-f0-9]{32}$ || "\$mutation" != *"; display-message -p \$receipt" ]]; then
+      echo "invalid Ralph owner receipt mutation" >&2
+      exit 1
+    fi
+    printf '%s' "\$owner" > "${cwd}/ralph-owner"
+    printf '%s\n' "\$receipt"
+    ;;
+  show-option)
+    [ "\${1:-}" = '-qv' ] && [ "\${2:-}" = '-p' ] && [ "\${3:-}" = '-t' ] && [ "\${4:-}" = "${currentPaneId}" ] && [ "\${5:-}" = '@omx_ralph_pane_owner_id' ] || exit 1
+    cat "${cwd}/ralph-owner"; printf '\n'
     ;;
   capture-pane)
-    printf "› ready\\n"
+    printf "› ready\n"
     ;;
   send-keys)
     ;;
@@ -306,6 +336,13 @@ describe('notify-hook Ralph session resume', () => {
       assert.equal(currentState.owner_codex_session_id, 'codex-session-1');
       assert.equal(currentState.tmux_pane_id, currentPaneId);
       assert.ok(typeof currentState.tmux_pane_set_at === 'string' && currentState.tmux_pane_set_at.length > 0);
+      assert.deepEqual(currentState.ralph_expected_authority, {
+        pane_id: currentPaneId,
+        pane_pid: 4242,
+        session_name: 'devsess',
+        pane_instance_id: 'instance-1',
+        pane_owner_id: currentState.tmux_pane_owner_id,
+      });
 
       const priorState = JSON.parse(await readFile(join(priorSessionDir, 'ralph-state.json'), 'utf-8')) as Record<string, unknown>;
       assert.equal(priorState.active, true);
@@ -922,7 +959,7 @@ describe('notify-hook Ralph session resume', () => {
           authorization: authorizedRalphScope(currentOmxSessionId, 'codex-session-1', [currentOmxSessionId, priorOmxSessionId]),
           payloadSessionId: 'codex-session-1',
           payloadThreadId: 'thread-concurrent-1',
-          env: { ...process.env, TMUX_PANE: '%55' },
+          env: { ...process.env, TMUX_PANE: '%88' },
           hooks: {
             afterLockAcquired: async () => {
               firstInsideLock = true;
@@ -940,7 +977,7 @@ describe('notify-hook Ralph session resume', () => {
           authorization: authorizedRalphScope(currentOmxSessionId, 'codex-session-1', [currentOmxSessionId, priorOmxSessionId]),
           payloadSessionId: 'codex-session-1',
           payloadThreadId: 'thread-concurrent-1',
-          env: { ...process.env, TMUX_PANE: '%56' },
+          env: { ...process.env, TMUX_PANE: '%88' },
         });
 
         releaseFirstLock();
@@ -954,7 +991,7 @@ describe('notify-hook Ralph session resume', () => {
         assert.equal(currentState.active, true);
         assert.equal(currentState.owner_omx_session_id, currentOmxSessionId);
         assert.equal(currentState.owner_codex_session_id, 'codex-session-1');
-        assert.equal(currentState.tmux_pane_id, '%56');
+        assert.equal(currentState.tmux_pane_id, '%88');
 
         const priorState = JSON.parse(await readFile(join(priorSessionDir, 'ralph-state.json'), 'utf-8')) as Record<string, unknown>;
         assert.equal(priorState.active, false);

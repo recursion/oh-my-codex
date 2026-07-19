@@ -220,6 +220,7 @@ async function writeSuccessfulScaleUpTmuxStub(
     malformedLivenessBatch?: boolean;
     recycleOperationMarker?: boolean;
     recyclePidAtLivenessProbe?: number;
+    rejectOwnerTagReceipt?: boolean;
     readyCapture?: boolean;
   } = {},
 ): Promise<void> {
@@ -291,6 +292,7 @@ function tmuxAuthorityListPanesCase(
     malformedLivenessBatch?: boolean;
     recycleOperationMarker?: boolean;
     recyclePidAtLivenessProbe?: number;
+    rejectOwnerTagReceipt?: boolean;
     readyCapture?: boolean;
     atomicSendFailure?: boolean;
   } = {},
@@ -329,8 +331,8 @@ function tmuxAuthorityListPanesCase(
   "    case \"$*\" in *'#{session_id}') printf '$1\\n' ;; esac",
   '    ;;',
   '  if-shell)',
-    `    if [ "${options.recyclePidAtLivenessProbe === undefined ? '0' : '1'}" = 1 ] && [ -f "$0.liveness-probe-count" ]; then IFS= read -r liveness_probe_count < "$0.liveness-probe-count"; if [ "$liveness_probe_count" -ge ${options.recyclePidAtLivenessProbe ?? 0} ]; then case "\${5:-}" in *1000000031*) printf '%s\\n' '__omx_send_authority_rejected__'; exit 0 ;; esac; fi; fi`,
-    `    success="\${6:-}"; receipt="\${success##*display-message -p }"; receipt="\${receipt%% *}"; case "$success" in ${options.atomicSendFailure === true ? '*paste-buffer*) exit 1 ;; ' : ''}*capture-pane*) printf '%s\\n' '›' ;; esac; case "$success" in *display-message\\ -p\\ __OMX_PANE_MUTATION_[a-f0-9]*__*|*display-message\\ -p\\ __OMX_SEND_AUTHORITY_[a-f0-9]*__*) printf '%s\\n' "$receipt" ;; esac`,
+    `    target=''; condition=''; success=''; case "\${2:-}" in -F) if [ "\${3:-}" = -t ]; then target="\${4:-}"; condition="\${5:-}"; success="\${6:-}"; else condition="\${3:-}"; success="\${4:-}"; fi ;; -t) target="\${3:-}"; if [ "\${4:-}" = -F ]; then condition="\${5:-}"; success="\${6:-}"; fi ;; *) exit 1 ;; esac; expected_pid=42424; case "$target" in %3[0-9]) pane_number="\${target#%}"; expected_pid=$((1000000000 + pane_number)) ;; esac; case "$condition" in *"#{==:#{pane_id},$target}"*"#{==:#{pane_dead},0}"*"#{==:#{pane_pid},$expected_pid}"*'#{==:#{session_id},$1}'*) ;; *) printf '%s\\n' '__omx_authority_rejected__'; exit 0 ;; esac; receipt="\${success##*display-message -p }"; receipt="\${receipt%% *}"; case "$success" in *"set-option -p -t "*" @omx_team_pane_owner_id "*) if [ "${options.rejectOwnerTagReceipt === true ? '1' : '0'}" = 1 ]; then printf '%s\\n' '__omx_team_owner_tag_rejected__'; exit 0; fi; set -- $success; if [ "\${1:-}" = set-option ] && [ "\${2:-}" = -p ] && [ "\${3:-}" = -t ] && [ "\${5:-}" = @omx_team_pane_owner_id ]; then printf '%s\\n' "\${6:-}" > "$0.pane-owner-\${4:-}"; : > "$0.owner-tagged"; fi ;; esac; if [ "${options.recyclePidAtLivenessProbe === undefined ? '0' : '1'}" = 1 ] && [ -f "$0.liveness-probe-count" ]; then IFS= read -r liveness_probe_count < "$0.liveness-probe-count"; if [ "$liveness_probe_count" -ge ${options.recyclePidAtLivenessProbe ?? 0} ]; then case "$condition" in *1000000031*) printf '%s\\n' '__omx_send_authority_rejected__'; exit 0 ;; esac; fi; fi`,
+    `    case "$success" in ${options.atomicSendFailure === true ? '*paste-buffer*) exit 1 ;; ' : ''}*capture-pane*) printf '%s\\n' '›' ;; esac; case "$success" in *display-message\\ -p\\ __OMX_PANE_MUTATION_[a-f0-9]*__*|*display-message\\ -p\\ __OMX_SEND_AUTHORITY_[a-f0-9]*__*) printf '%s\\n' "$receipt" ;; esac`,
     '    ;;',
   ];
 }
@@ -923,7 +925,13 @@ esac
       const commands = await readScaleUpTmuxLogCommands(tmuxLogPath);
       assert.ok(commands.some((command) => command.startsWith('list-panes -t omx-team-scale-up-owned-panes ')));
       assert.ok(commands.some((command) => command.startsWith('split-window -v -t %21 ')));
-      assert.ok(commands.includes('set-option -p -t %31 @omx_team_pane_owner_id team:scale-up-owned-panes'));
+      assert.ok(commands.some((command) => command.startsWith('if-shell -t %31 -F ')
+        && command.includes('#{==:#{pane_id},%31}')
+        && command.includes('#{==:#{pane_dead},0}')
+        && command.includes('#{==:#{pane_pid},1000000031}')
+        && command.includes('#{==:#{session_id},$1}')
+        && command.includes('set-option -p -t %31 @omx_team_pane_owner_id team:scale-up-owned-panes')
+        && command.includes('display-message -p __OMX_PANE_MUTATION_')), commands.join('\n'));
     } finally {
       if (typeof previousPath === 'string') process.env.PATH = previousPath;
       else delete process.env.PATH;
@@ -1224,9 +1232,13 @@ exit 0
       assert.match(inbox, /Role: writer/);
 
       const tmuxCommands = await readScaleUpTmuxLogCommands(tmuxLogPath);
-      assert.ok(tmuxCommands.some((command) => (
-        command === 'set-option -p -t %31 @omx_team_pane_owner_id team:scale-up-role'
-      )));
+      assert.ok(tmuxCommands.some((command) => command.startsWith('if-shell -t %31 -F ')
+        && command.includes('#{==:#{pane_id},%31}')
+        && command.includes('#{==:#{pane_dead},0}')
+        && command.includes('#{==:#{pane_pid},1000000031}')
+        && command.includes('#{==:#{session_id},$1}')
+        && command.includes('set-option -p -t %31 @omx_team_pane_owner_id team:scale-up-role')
+        && command.includes('display-message -p __OMX_PANE_MUTATION_')), tmuxCommands.join('\n'));
     } finally {
       if (typeof previousPath === 'string') process.env.PATH = previousPath;
       else delete process.env.PATH;
@@ -1401,7 +1413,7 @@ printf '%s\\n' "$@" > '${capturePath}'
           "    case \"$*\" in *'#{session_id}') printf '$1\\n' ;; esac",
           '    ;;',
           '  if-shell)',
-          "    success=\"${6:-}\"; receipt=\"${success##*display-message -p }\"; receipt=\"${receipt%% *}\"; case \"$receipt\" in __OMX_PANE_MUTATION_[a-f0-9]*__) printf '%s\\n' \"$receipt\" ;; esac",
+          '    success="${6:-}"; receipt="${success##*display-message -p }"; receipt="${receipt%% *}"; case "$success" in *"set-option -p -t "*" @omx_team_pane_owner_id "*) echo "owner tag failed" >&2; exit 1 ;; esac; case "$receipt" in __OMX_PANE_MUTATION_[a-f0-9]*__) printf "%s\\n" "$receipt" ;; esac',
           '    ;;',
 
           ...tmuxAuthorityListPanesCase(['%11', '%21']),
@@ -1429,17 +1441,20 @@ printf '%s\\n' "$@" > '${capturePath}'
       );
       assert.equal(result.ok, false);
       if (result.ok) return;
-      assert.match(result.error, /Failed to tag tmux pane for worker-2/);
+      assert.match(result.error, /Failed to atomically tag tmux pane ownership for worker-2/);
 
       const config = await readTeamConfig('scale-up-owner-tag-rollback', cwd);
       assert.equal(config?.workers.length, 1);
       assert.equal(await readTask('scale-up-owner-tag-rollback', '1', cwd), null);
 
       const tmuxCommands = await readScaleUpTmuxLogCommands(tmuxLogPath);
-      assert.ok(tmuxCommands.some((command) => (
-        command === 'set-option -p -t %31 @omx_team_pane_owner_id team:scale-up-owner-tag-rollback'
-      )));
-      assert.ok(tmuxCommands.some((command) => command.startsWith('if-shell -F -t %31 ')));
+      assert.ok(tmuxCommands.some((command) => command.startsWith('if-shell -t %31 -F ')
+        && command.includes('#{==:#{pane_id},%31}')
+        && command.includes('#{==:#{pane_dead},0}')
+        && command.includes('#{==:#{pane_pid},1000000031}')
+        && command.includes('#{==:#{session_id},$1}')
+        && command.includes('set-option -p -t %31 @omx_team_pane_owner_id team:scale-up-owner-tag-rollback')
+        && command.includes('display-message -p __OMX_PANE_MUTATION_')), tmuxCommands.join('\n'));
       assert.equal(tmuxCommands.some((command) => /^kill-pane\b/.test(command)), false);
     } finally {
       if (typeof previousPath === 'string') process.env.PATH = previousPath;
@@ -1487,7 +1502,7 @@ printf '%s\\n' "$@" > '${capturePath}'
             '  show-options) cat "$0.option-${4:-}"; printf "\\n" ;;',
             "  display-message) case \"$*\" in *'#{session_id}') printf '$1\\n' ;; esac ;;",
             '  if-shell)',
-            '    success="${6:-}"; receipt="${success##*display-message -p }"; receipt="${receipt%% *}"',
+            "    condition=\"${3:-}\"; success=\"${6:-}\"; case \"$condition\" in *\"#{==:#{pane_id},%31}\"*\"#{==:#{pane_dead},0}\"*\"#{==:#{pane_pid},1000000031}\"*'#{==:#{session_id},$1}'*) ;; *) printf \"%s\\n\" \"__omx_scale_split_rollback_rejected__\"; exit 0 ;; esac; receipt=\"${success##*display-message -p }\"; receipt=\"${receipt%% *}\"",
             '    case "$success" in',
             '      *"kill-pane -t %31"*)',
             receiptMode === 'exact'
@@ -1659,6 +1674,52 @@ printf '%s\\n' "$@" > '${capturePath}'
       await rm(fakeBinDir, { recursive: true, force: true });
     }
   });
+  it('rejects a guarded owner-tag transaction with a rejected receipt', async () => {
+    const teamName = 'scale-up-owner-tag-receipt';
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-scale-up-owner-tag-receipt-'));
+    const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-up-owner-tag-receipt-bin-'));
+    const tmuxLogPath = join(fakeBinDir, 'tmux.log');
+    const previousPath = process.env.PATH;
+    try {
+      await writeSuccessfulScaleUpTmuxStub(fakeBinDir, tmuxLogPath, false, { rejectOwnerTagReceipt: true });
+      process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
+      await initTeamState(teamName, 'task', 'executor', 1, cwd);
+      await configureScaleUpTeamForDirectDispatch(teamName, cwd);
+
+      const result = await scaleUp(
+        teamName,
+        1,
+        'executor',
+        [{ subject: 'new work', description: 'new work', owner: 'worker-2' }],
+        cwd,
+        { OMX_TEAM_SCALING_ENABLED: '1', OMX_TEAM_SKIP_READY_WAIT: '1' },
+      );
+
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error, /Failed to atomically tag tmux pane ownership/);
+      const config = await readTeamConfig(teamName, cwd);
+      assert.equal(config?.workers.length, 1);
+      const commands = await readScaleUpTmuxLogCommands(tmuxLogPath);
+      assert.ok(commands.some((command) => command.startsWith('if-shell -t %31 -F ')
+        && command.includes('#{==:#{pane_id},%31}')
+        && command.includes('#{==:#{pane_dead},0}')
+        && command.includes('#{==:#{pane_pid},1000000031}')
+        && command.includes('#{==:#{session_id},$1}')
+        && command.includes('set-option -p -t %31 @omx_team_pane_owner_id team:scale-up-owner-tag-receipt')
+        && command.includes('display-message -p __OMX_PANE_MUTATION_')), commands.join('\n'));
+      assert.equal(commands.some((command) => command.includes('paste-buffer -d -b omx-send-')), false, commands.join('\n'));
+      assert.equal(
+        existsSync(join(cwd, '.omx', 'state', 'team', teamName, 'workers', 'worker-2', 'identity.json')),
+        false,
+      );
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      await rm(cwd, { recursive: true, force: true });
+      await rm(fakeBinDir, { recursive: true, force: true });
+    }
+  });
+
 
   it('fails closed when a verified split PID is recycled during readiness, dispatch, or pre-save', async () => {
     const cases = [
@@ -2659,34 +2720,10 @@ exit 0
     const repo = await initRepo();
     const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-up-detached-bin-'));
     const tmuxLogPath = join(fakeBinDir, 'tmux.log');
-    const tmuxStubPath = join(fakeBinDir, 'tmux');
     const previousPath = process.env.PATH;
 
     try {
-      await writeFile(
-        tmuxStubPath,
-        [
-          '#!/bin/sh',
-          'set -eu',
-          `printf '%s\n' "$*" >> "${tmuxLogPath}"`,
-          'case "${1:-}" in',
-          '  -V)',
-          '    echo "tmux 3.2a"',
-          '    ;;',
-          '  split-window)',
-          '    echo "%41"',
-          tmuxCreatedPaneMarkerLine('%41'),
-          '    ;;',
-          ...tmuxAuthorityListPanesCase(['%11', '%21'], '45454'),
-          '  capture-pane)',
-          '    echo ""',
-          '    ;;',
-          'esac',
-          'exit 0',
-          '',
-        ].join('\n'),
-      );
-      await chmod(tmuxStubPath, 0o755);
+      await writeSuccessfulScaleUpTmuxStub(fakeBinDir, tmuxLogPath);
       await writeFile(tmuxLogPath, '');
       process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
 
@@ -2759,34 +2796,10 @@ exit 0
     const repo = await initRepo();
     const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-scale-up-named-bin-'));
     const tmuxLogPath = join(fakeBinDir, 'tmux.log');
-    const tmuxStubPath = join(fakeBinDir, 'tmux');
     const previousPath = process.env.PATH;
 
     try {
-      await writeFile(
-        tmuxStubPath,
-        [
-          '#!/bin/sh',
-          'set -eu',
-          `printf '%s\n' "$*" >> "${tmuxLogPath}"`,
-          'case "${1:-}" in',
-          '  -V)',
-          '    echo "tmux 3.2a"',
-          '    ;;',
-          '  split-window)',
-          '    echo "%42"',
-          tmuxCreatedPaneMarkerLine('%42'),
-          '    ;;',
-          ...tmuxAuthorityListPanesCase(['%11', '%21'], '46464'),
-          '  capture-pane)',
-          '    echo ""',
-          '    ;;',
-          'esac',
-          'exit 0',
-          '',
-        ].join('\n'),
-      );
-      await chmod(tmuxStubPath, 0o755);
+      await writeSuccessfulScaleUpTmuxStub(fakeBinDir, tmuxLogPath);
       await writeFile(tmuxLogPath, '');
       process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
 

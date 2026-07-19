@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
 import { readExactPaneProofSync } from '../team/exact-pane.js';
 import { spawnPlatformCommandSync } from '../utils/platform-command.js';
+import { parseExactTmuxAuthorityScalar } from '../hud/tmux.js';
+
 
 import { execFileSync } from 'child_process';
 
@@ -45,12 +47,26 @@ function hasNonEmptyString(value: unknown): boolean {
 
 export const OMX_RALPH_PANE_OWNER_OPTION = '@omx_ralph_pane_owner_id';
 
+export interface RalphExpectedAuthority {
+  pane_id: string;
+  pane_pid: number;
+  session_name: string;
+  pane_instance_id: string;
+  pane_owner_id: string;
+}
+
 interface RalphPaneBinding {
   paneId: string;
   panePid: number;
   sessionName: string;
   paneOwnerId: string;
+  expectedAuthority: RalphExpectedAuthority;
 }
+
+function exactNonEmptyTmuxScalar(value: unknown): string | null {
+  return typeof value === 'string' ? parseExactTmuxAuthorityScalar(value) : null;
+}
+
 
 function clearRalphPaneBinding(state: ModeStateContextLike): void {
   delete state.tmux_pane_id;
@@ -59,49 +75,79 @@ function clearRalphPaneBinding(state: ModeStateContextLike): void {
   delete state.tmux_session_name;
   delete state.tmux_pane_set_at;
   delete state.tmux_window_id;
+  delete state.ralph_expected_authority;
+}
+
+function setRalphExpectedAuthority(state: ModeStateContextLike, authority: RalphExpectedAuthority): void {
+  state.ralph_expected_authority = authority;
+}
+
+
+function isSafeRalphTmuxAuthorityToken(value: string): boolean {
+  return /^[A-Za-z0-9_.:-]+$/.test(value);
 }
 
 function captureRalphPaneBinding(paneId: string): RalphPaneBinding | null {
   const initialProof = readExactPaneProofSync(paneId);
   if (initialProof.status !== 'live') return null;
 
-  const paneOwnerId = `ralph:${randomUUID()}`;
-  const effectProof = readExactPaneProofSync(initialProof.paneId);
-  if (effectProof.status !== 'live' || effectProof.pid !== initialProof.pid) return null;
-  const tagged = spawnPlatformCommandSync(
+  const snapshot = spawnPlatformCommandSync(
     'tmux',
-    ['set-option', '-p', '-t', effectProof.paneId, OMX_RALPH_PANE_OWNER_OPTION, paneOwnerId],
+    ['display-message', '-p', '-t', initialProof.paneId, '#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_name}\t#{@omx_pane_instance_id}'],
     { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).result;
-  if (tagged.error || tagged.status !== 0) return null;
+  const snapshotLine = exactNonEmptyTmuxScalar(snapshot.stdout);
+  const fields = snapshotLine?.split('\t');
+  if (
+    snapshot.error || snapshot.status !== 0 || !fields || fields.length !== 5
+    || fields[0] !== initialProof.paneId || fields[1] !== '0' || fields[2] !== String(initialProof.pid)
+    || !isSafeRalphTmuxAuthorityToken(fields[3]) || !isSafeRalphTmuxAuthorityToken(fields[4])
+  ) return null;
+  const [, , , sessionName, paneInstanceId] = fields;
+
+  const paneOwnerId = `ralph:${randomUUID()}`;
+  const receipt = randomUUID().replace(/-/g, '');
+  const authority = `#{&&:#{&&:#{&&:#{==:#{pane_id},${initialProof.paneId}},#{==:#{pane_dead},0}},#{==:#{pane_pid},${initialProof.pid}}},#{&&:#{==:#{session_name},${sessionName}},#{==:#{@omx_pane_instance_id},${paneInstanceId}}}}`;
+  const tagged = spawnPlatformCommandSync(
+    'tmux',
+    ['if-shell', '-t', initialProof.paneId, '-F', authority, `set-option -p -t ${initialProof.paneId} ${OMX_RALPH_PANE_OWNER_OPTION} ${paneOwnerId}; display-message -p ${receipt}`, ''],
+    { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+  ).result;
+  if (tagged.error || tagged.status !== 0 || exactNonEmptyTmuxScalar(tagged.stdout) !== receipt) return null;
 
   const owner = spawnPlatformCommandSync(
     'tmux',
     ['show-option', '-qv', '-p', '-t', initialProof.paneId, OMX_RALPH_PANE_OWNER_OPTION],
     { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).result;
-  if (owner.error || owner.status !== 0 || typeof owner.stdout !== 'string' || owner.stdout.trim() !== paneOwnerId) {
-    return null;
-  }
+  if (owner.error || owner.status !== 0 || exactNonEmptyTmuxScalar(owner.stdout) !== paneOwnerId) return null;
 
   const finalProof = readExactPaneProofSync(initialProof.paneId);
   if (finalProof.status !== 'live' || finalProof.pid !== initialProof.pid) return null;
-
-  const session = spawnPlatformCommandSync(
+  const finalSnapshot = spawnPlatformCommandSync(
     'tmux',
-    ['display-message', '-p', '-t', finalProof.paneId, '#{session_name}'],
+    ['display-message', '-p', '-t', finalProof.paneId, '#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_name}\t#{@omx_pane_instance_id}'],
     { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
   ).result;
-  if (session.error || session.status !== 0 || typeof session.stdout !== 'string') return null;
-  const sessionName = session.stdout.trim();
-  if (sessionName === '') return null;
+  if (finalSnapshot.error || finalSnapshot.status !== 0 || exactNonEmptyTmuxScalar(finalSnapshot.stdout) !== snapshotLine) return null;
 
   return {
     paneId: finalProof.paneId,
     panePid: finalProof.pid,
     sessionName,
     paneOwnerId,
+    expectedAuthority: {
+      pane_id: finalProof.paneId,
+      pane_pid: finalProof.pid,
+      session_name: sessionName,
+      pane_instance_id: paneInstanceId,
+      pane_owner_id: paneOwnerId,
+    },
   };
+}
+
+export function captureRalphExpectedAuthority(paneId: string): RalphExpectedAuthority | null {
+  return captureRalphPaneBinding(paneId)?.expectedAuthority ?? null;
 }
 
 export function withModeRuntimeContext<T extends ModeStateContextLike>(
@@ -130,7 +176,7 @@ export function withModeRuntimeContext<T extends ModeStateContextLike>(
     }
   }
 
-  const ralphPaneId = typeof next.tmux_pane_id === 'string' ? next.tmux_pane_id.trim() : '';
+  const ralphPaneId = typeof next.tmux_pane_id === 'string' ? next.tmux_pane_id : '';
   if (isRalphActivation && ralphPaneId) {
     const binding = captureRalphPaneBinding(ralphPaneId);
     if (binding) {
@@ -138,6 +184,7 @@ export function withModeRuntimeContext<T extends ModeStateContextLike>(
       next.tmux_pane_pid = binding.panePid;
       next.tmux_session_name = binding.sessionName;
       next.tmux_pane_owner_id = binding.paneOwnerId;
+      setRalphExpectedAuthority(next, binding.expectedAuthority);
     } else {
       clearRalphPaneBinding(next);
     }

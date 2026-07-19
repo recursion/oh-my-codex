@@ -47,10 +47,11 @@ describe('HUD pane identity boundaries', () => {
     for (const paneId of unsafePaneIds) assert.equal(parseCanonicalTmuxPaneId(paneId), null);
   });
 
-  it('requires exact LF authority frames and rejects truncation, CR, and extra terminators', () => {
+  it('requires exactly one LF or CRLF authority terminator', () => {
     assert.deepEqual(parseExactTmuxAuthorityLines('%1\n%2\n'), ['%1', '%2']);
     assert.equal(parseExactTmuxAuthorityScalar('%1\n'), '%1');
-    for (const malformed of ['%1', '%1\r\n', '%1\r', '%1\n\n', '%1\n%2']) {
+    assert.equal(parseExactTmuxAuthorityScalar('%1\r\n'), '%1');
+    for (const malformed of ['%1', '%1\r', '%1\n\n', '%1\r\n\r\n', '%1\n%2']) {
       assert.equal(parseExactTmuxAuthorityLines(malformed), null, JSON.stringify(malformed));
       assert.equal(parseExactTmuxAuthorityScalar(malformed), null, JSON.stringify(malformed));
     }

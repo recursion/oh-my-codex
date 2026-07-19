@@ -94,6 +94,7 @@ import {
   DETACHED_TMUX_HISTORY_LIMIT,
   isExistingTmuxWindowTooCrampedForLaunchHud,
   mutateInsideTmuxHudPane,
+  setDetachedTmuxSessionHistoryLimit,
 } from "../index.js";
 import { mergeConfig, repairConfigIfNeeded } from "../../config/generator.js";
 import { ensureReusableNodeModules } from "../../utils/repo-deps.js";
@@ -3415,9 +3416,13 @@ describe("tmux HUD pane helpers", () => {
     ]);
   });
 
-  it("parseStrictTmuxPaneIncarnations skips valid dead remain-on-exit panes", () => {
-    const incarnations = parseStrictTmuxPaneIncarnations("%1 0 101\n%2 1 0\n%3 0 303\n");
-    assert.deepEqual(incarnations, new Map([["%1", "101"], ["%3", "303"]]));
+  it("parseStrictTmuxPaneIncarnations accepts exactly one LF or CRLF terminator and rejects malformed frames", () => {
+    const expected = new Map([["%1", "101"], ["%3", "303"]]);
+    assert.deepEqual(parseStrictTmuxPaneIncarnations("%1 0 101\n%2 1 0\n%3 0 303\n"), expected);
+    assert.deepEqual(parseStrictTmuxPaneIncarnations("%1 0 101\n%2 1 0\n%3 0 303\r\n"), expected);
+    assert.equal(parseStrictTmuxPaneIncarnations("%1 0 101"), null);
+    assert.equal(parseStrictTmuxPaneIncarnations("%1 0 101\n\n"), null);
+    assert.equal(parseStrictTmuxPaneIncarnations("%1 0 101\r\n\r\n"), null);
     assert.equal(parseStrictTmuxPaneIncarnations("%1 0 101\n%02 1 0\n"), null);
     assert.equal(parseStrictTmuxPaneIncarnations("%1 0 101\n%2 2 202\n"), null);
     assert.equal(parseStrictTmuxPaneIncarnations("%1 0 101\n%2 1 0\n%1 0 101\n"), null);
@@ -3501,7 +3506,7 @@ describe("detached tmux new-session sequencing", () => {
     );
     assert.deepEqual(
       steps.map((step) => step.name),
-      ["new-session", "tag-session", "split-and-capture-hud-pane"],
+      ["new-session", "split-and-capture-hud-pane"],
     );
     const splitStep = steps.find((step) => step.name === "split-and-capture-hud-pane");
     assert.ok(splitStep);
@@ -3551,22 +3556,14 @@ describe("detached tmux new-session sequencing", () => {
       "sess-detached-managed",
     );
     const newSession = steps.find((step) => step.name === "new-session");
-    const tagSession = steps.find((step) => step.name === "tag-session");
     assert.ok(newSession);
-    assert.ok(tagSession);
     assert.equal(
       newSession!.args.includes("-e") &&
         newSession!.args.some((arg) => arg === "OMX_SESSION_ID=sess-detached-managed"),
       true,
     );
     assert.equal(newSession!.args.some((arg) => arg === "OMX_TMUX_HUD_OWNER=1"), true);
-    assert.deepEqual(tagSession!.args, [
-      "set-option",
-      "-t",
-      "omx-demo",
-      "@omx_instance_id",
-      "sess-detached-managed",
-    ]);
+    assert.equal(steps.some((step) => step.name === "tag-session"), false);
   });
 
   it("buildDetachedSessionBootstrapSteps forwards inherited leader model separately from worker launch args", () => {
@@ -4238,6 +4235,57 @@ exit 1
       else process.env.PATH = previousPath;
       delete process.env.OMX_TEST_HUD_AUTHORITY_MODE;
       delete process.env.OMX_TEST_HUD_EFFECTS;
+      await rm(fakeBinDir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds detached history mutations and their receipts to the exact pane session incarnation", async () => {
+    const fakeBinDir = await mkdtemp(join(tmpdir(), "omx-history-authority-bin-"));
+    const fakeTmuxPath = join(fakeBinDir, "tmux");
+    const effectsPath = join(fakeBinDir, "effects.log");
+    const previousPath = process.env.PATH;
+    try {
+      await writeFile(fakeTmuxPath, `#!/usr/bin/env bash
+set -eu
+[[ "$1" == "if-shell" ]] || exit 1
+target="$4"
+condition="$5"
+then_command="$6"
+if [[ -n "\${OMX_TEST_HISTORY_SESSION:-}" ]]; then
+  [[ "$condition" == *'#{==:#{session_id},$99}'* ]] || exit 0
+else
+  [[ "$condition" == *'#{==:#{session_id},$12}'* ]] || exit 1
+fi
+[[ "$target" == "%12" ]] || exit 1
+[[ "$condition" == *"#{==:#{pane_id},%12}"* ]] || exit 1
+[[ "$condition" == *"#{==:#{pane_pid},101}"* ]] || exit 1
+[[ "$then_command" == *'set-option -q -t $12 history-limit ${DETACHED_TMUX_HISTORY_LIMIT}'* ]] || exit 1
+[[ "$then_command" == *"set-option -pq -t %12 history-limit ${DETACHED_TMUX_HISTORY_LIMIT}"* ]] || exit 1
+[[ "$then_command" =~ display-message[[:space:]]-p[[:space:]]-t[[:space:]]%12[[:space:]]([a-f0-9]{32}) ]] || exit 1
+receipt="\${BASH_REMATCH[1]}"
+printf 'history:$12\n' >> "$OMX_TEST_HISTORY_EFFECTS"
+case "\${OMX_TEST_HISTORY_RECEIPT_MODE:-exact}" in
+  exact) printf '%s\\n' "$receipt" ;;
+  malformed) printf '%s\\n\\n' "$receipt" ;;
+esac
+`);
+      await chmod(fakeTmuxPath, 0o755);
+      process.env.PATH = `${fakeBinDir}:${previousPath || ""}`;
+      process.env.OMX_TEST_HISTORY_EFFECTS = effectsPath;
+
+      assert.equal(setDetachedTmuxSessionHistoryLimit("$12", "%12", "101"), true);
+      process.env.OMX_TEST_HISTORY_SESSION = "$99";
+      assert.equal(setDetachedTmuxSessionHistoryLimit("$12", "%12", "101"), false, "a recycled session fails before either history mutation");
+      delete process.env.OMX_TEST_HISTORY_SESSION;
+      process.env.OMX_TEST_HISTORY_RECEIPT_MODE = "malformed";
+      assert.equal(setDetachedTmuxSessionHistoryLimit("$12", "%12", "101"), false, "only one exact LF receipt acknowledges the mutation");
+      assert.equal(await readFile(effectsPath, "utf8"), "history:$12\nhistory:$12\n");
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      delete process.env.OMX_TEST_HISTORY_EFFECTS;
+      delete process.env.OMX_TEST_HISTORY_RECEIPT_MODE;
+      delete process.env.OMX_TEST_HISTORY_SESSION;
       await rm(fakeBinDir, { recursive: true, force: true });
     }
   });

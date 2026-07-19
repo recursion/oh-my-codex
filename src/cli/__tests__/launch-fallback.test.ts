@@ -685,6 +685,15 @@ case "$1" in
     ;;
   if-shell)
     case "$*" in
+      *'@omx_instance_id'*)
+        instance="\${6#*@omx_instance_id }"
+        instance="\${instance%% *}"
+        printf '%s\n' "$instance" > "${instanceMarker}"
+        receipt="\${6##*display-message -p -t }"
+        receipt="\${receipt#* }"
+        receipt="\${receipt%%\\'*}"
+        printf '%s\n' "$receipt"
+        ;;
       *'@omx_detached_launch_proof'*)
         receipt="\${6##*display-message -p -t }"
         receipt="\${receipt#* }"
@@ -704,7 +713,7 @@ case "$1" in
     ;;
   set-option)
     if [ "$4" = '@omx_instance_id' ]; then
-      printf '%s\n' "$5" > "${instanceMarker}"
+      printf '%s\r\n' "$5" > "${instanceMarker}"
     fi
     exit 0
     ;;
@@ -741,6 +750,12 @@ exit 0
       assert.equal((tmuxLog.match(/tmux:new-session/g) || []).length, 1);
       assert.equal((tmuxLog.match(/tmux:has-session/g) || []).length, 1);
       assert.equal((tmuxLog.match(/tmux:attach-session/g) || []).length, 2);
+      assert.match(
+        tmuxLog,
+        /tmux:if-shell -F -t %12 .*#\{==:#\{session_name\},[^} ]+\}.*#\{==:#\{pane_id\},%12\}.*#\{==:#\{pane_pid\},101\}.*#\{==:#\{@omx_detached_launch_proof\},[a-f0-9]{32}\}.*set-option -q -t \$12 @omx_instance_id omx-[A-Za-z0-9._-]+.*display-message -p -t %12 [a-f0-9]{32}/,
+      );
+      assert.doesNotMatch(tmuxLog, /tmux:set-option .*@omx_instance_id/);
+      assert.doesNotMatch(tmuxLog, /tmux:(show-options|set-option) .*?(mode-style|copy-mode-selection-style)/);
       const activeRecords = await readFile(
         join(runs, 'active-detached', 'boxed-context-under-test.json'),
         'utf-8',
@@ -1875,7 +1890,7 @@ exit 0
     }
   });
 
-  it('rolls back the exact newly created session when capture receipts are absent or malformed', async () => {
+  it('rolls back with provisional create authority when proof installation or capture receipts are absent or malformed', async () => {
     for (const receipt of ['', 'not-the-launch-proof']) {
       const wd = await mkdtemp(join(tmpdir(), 'omx-launch-tmux-capture-fail-'));
       try {
@@ -1904,15 +1919,84 @@ exit 0
         if (shouldSkipForSpawnPermissions(result.error)) return;
 
         const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+        const rollback = tmuxLog.trim().split('\n').at(-1) ?? "";
         assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
         assert.match(result.stdout, /fake-codex:.*--dangerously-bypass-approvals-and-sandbox/);
         assert.match(
-          tmuxLog,
-          /tmux:if-shell -F -t %12 .*#\{==:#\{session_name\},[^} ]+\}.*#\{==:#\{pane_id\},%12\}.*#\{==:#\{pane_pid\},101\}.*#\{==:#\{@omx_detached_launch_proof\},[a-f0-9]{32}\}.*kill-session -t /,
+          rollback,
+          /tmux:if-shell -F -t %12 .*#\{==:#\{session_name\},[^} ]+\}.*#\{==:#\{pane_id\},%12\}.*#\{==:#\{pane_pid\},101\}.*#\{==:#\{session_id\},\$12\}.*kill-session -t /,
         );
+        assert.doesNotMatch(rollback, /@omx_detached_launch_proof/);
       } finally {
         await rm(wd, { recursive: true, force: true });
       }
+    }
+  });
+
+  it('does not kill a session when the create receipt is absent or malformed', async () => {
+    for (const receipt of ['', '$12\tinvalid-pane\t101']) {
+      const wd = await mkdtemp(join(tmpdir(), 'omx-launch-tmux-create-receipt-fail-'));
+      try {
+        const { env, tmuxLogPath } = await createLaunchFixture(
+          wd,
+          (tmuxLogPath) => `#!/bin/sh
+printf 'tmux:%s\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V|list-sessions) exit 0 ;;
+  new-session) printf '%s\n' '${receipt}'; exit 0 ;;
+esac
+exit 0
+`,
+        );
+        const result = runOmx(wd, ['--madmax', '--tmux'], { ...env, TMUX: '', TMUX_PANE: '' });
+        if (shouldSkipForSpawnPermissions(result.error)) return;
+
+        const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+        assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
+        assert.match(result.stdout, /fake-codex:.*--dangerously-bypass-approvals-and-sandbox/);
+        assert.doesNotMatch(tmuxLog, /tmux:if-shell .*kill-session -t /);
+      } finally {
+        await rm(wd, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('does not kill a recycled session after provisional proof capture fails', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-tmux-provisional-recycle-'));
+    try {
+      const { env, tmuxLogPath } = await createLaunchFixture(
+        wd,
+        (tmuxLogPath) => `#!/bin/sh
+printf 'tmux:%s\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V|list-sessions) exit 0 ;;
+  new-session) printf '$12\t%%12\t101\n'; exit 0 ;;
+  display-message)
+    if [ "$2" = '-p' ] && [ "$5" = '#{session_id}\t#{pane_id}\t#{pane_pid}' ]; then
+      printf '$12\t%%12\t101\n'
+    fi
+    exit 0 ;;
+  if-shell)
+    case "$*" in
+      *'@omx_detached_launch_proof'*) printf 'recycled-session\n' ;;
+      *'#{pane_pid},101'*'kill-session -t '*) printf 'recycled-session-survived\n' ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+`,
+      );
+      const result = runOmx(wd, ['--madmax', '--tmux'], { ...env, TMUX: '', TMUX_PANE: '' });
+      if (shouldSkipForSpawnPermissions(result.error)) return;
+
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
+      assert.match(result.stdout, /fake-codex:.*--dangerously-bypass-approvals-and-sandbox/);
+      const rollback = tmuxLog.trim().split('\n').at(-1) ?? "";
+      assert.match(rollback, /#\{==:#\{pane_pid\},101\}.*#\{==:#\{session_id\},\$12\}.*kill-session -t /);
+      assert.doesNotMatch(rollback, /@omx_detached_launch_proof/);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
     }
   });
 

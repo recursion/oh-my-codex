@@ -227,6 +227,18 @@ function defaultAutoNudgePattern(_targetPane: string): RegExp {
   return new RegExp(`set-buffer -b [^\\n]+ -- ${DEFAULT_AUTO_NUDGE_RESPONSE.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')} \\[OMX_TMUX_INJECT\\]`);
 }
 
+const TEST_RALPH_PANE_OWNER_ID = 'ralph:00000000-0000-4000-8000-000000000000';
+
+function testRalphExpectedAuthority(paneId = '%42', panePid = 4201) {
+  return {
+    pane_id: paneId,
+    pane_pid: panePid,
+    session_name: 'session-test',
+    pane_instance_id: 'ralph-test-owner',
+    pane_owner_id: TEST_RALPH_PANE_OWNER_ID,
+  };
+}
+
 function buildFakeTmux(
   tmuxLogPath: string,
   options: { failSendKeys?: boolean; failSendKeysMatch?: string; includeCanonicalWorker?: boolean } = {},
@@ -255,6 +267,13 @@ if [[ "$cmd" == "if-shell" ]]; then
   if [[ -z "$pid" || "$condition" != *"#{pane_id},$target"* || "$condition" != *"#{pane_dead},0"* || "$condition" != *"#{pane_pid},$pid"* ]]; then
     exit 0
   fi
+  if [[ "$condition" == *"#{@omx_ralph_pane_owner_id}"* ]] && [[ "$condition" != *"#{session_name},session-test"* || "$condition" != *"#{@omx_pane_instance_id},ralph-test-owner"* || "$condition" != *"#{@omx_ralph_pane_owner_id},${TEST_RALPH_PANE_OWNER_ID}"* ]]; then
+    exit 0
+  fi
+  receipt="\${thenCommand##*display-message -p }"; receipt="\${receipt%% *}"
+  if [[ ! "$receipt" =~ ^[a-f0-9]{32}$ || "$thenCommand" != *"display-message -p $receipt" ]]; then
+    exit 1
+  fi
   if [[ "${options.failSendKeys === true ? '1' : '0'}" == "1" && "$thenCommand" == *"send-keys"* ]]; then
     echo "send failed" >&2
     exit 1
@@ -266,7 +285,7 @@ if [[ "$cmd" == "if-shell" ]]; then
   if [[ "$thenCommand" == *"paste-buffer"* && -f "${tmuxLogPath}.buffer" ]]; then
     echo "send-keys -t $target -l $(cat "${tmuxLogPath}.buffer")" >> "${tmuxLogPath}"
   fi
-  receipt="\${thenCommand##*display-message -p }"; receipt="\${receipt%% *}"; printf '%s\n' "$receipt"
+  printf '%s\n' "$receipt"
   exit 0
 fi
 if [[ "$cmd" == "capture-pane" ]]; then
@@ -309,6 +328,14 @@ if [[ "$cmd" == "display-message" ]]; then
     echo "0"
     exit 0
   fi
+  if [[ "$fmt" == "#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_name}\t#{@omx_pane_instance_id}\t#{@omx_ralph_pane_owner_id}" ]]; then
+    if [[ "\${target:-%42}" == "%43" ]]; then
+      printf '%%43\t0\t4301\t%s\t%s\t%s\r\n' "\${OMX_TEST_TMUX_SESSION_NAME:-session-test}" "ralph-test-owner" "${TEST_RALPH_PANE_OWNER_ID}"
+    else
+      printf '%%42\t0\t4201\t%s\t%s\t%s\r\n' "\${OMX_TEST_TMUX_SESSION_NAME:-session-test}" "ralph-test-owner" "${TEST_RALPH_PANE_OWNER_ID}"
+    fi
+    exit 0
+  fi
   if [[ "$fmt" == "#{pane_id}\t#{pane_dead}\t#{pane_pid}" ]]; then
     if [[ "\${target:-%42}" == "%43" ]]; then
       printf '%%43\t0\t4301\n'
@@ -327,6 +354,10 @@ if [[ "$cmd" == "display-message" ]]; then
     exit 0
   fi
   if [[ "$fmt" == "#{pane_current_command}" ]]; then
+    echo "codex"
+    exit 0
+  fi
+  if [[ "$fmt" == "#{pane_start_command}" ]]; then
     echo "codex"
     exit 0
   fi
@@ -446,6 +477,9 @@ function buildManagedRalphTmux(
       return `${paneId}\t${active}\t${currentCommand}\t${startCommand}`;
     })
     .join('\n');
+  const recoveryPaneOutput = panes
+    .map((pane) => `${pane.paneId}\t${pane.currentCommand || 'codex'}\t${pane.startCommand || 'codex'}`)
+    .join('\n');
   const paneCommandBranches = panes
     .map((pane) => {
       const currentCommand = (pane.currentCommand || 'codex').replace(/"/g, '\\"');
@@ -479,8 +513,11 @@ if [[ "$cmd" == "if-shell" ]]; then
   pid=""
   if [[ "$target" == "${anchorPane}" ]]; then pid="9901"; fi
   if [[ "$target" == "${livePane}" ]]; then pid="4201"; fi
-  if [[ -n "$pid" && "$condition" == *"#{pane_id},$target"* && "$condition" == *"#{pane_dead},0"* && "$condition" == *"#{pane_pid},$pid"* ]]; then
-    receipt="\${thenCommand##*display-message -p }"; receipt="\${receipt%% *}"; printf '%s\n' "$receipt"
+  if [[ -n "$pid" && "$condition" == *"#{pane_id},$target"* && "$condition" == *"#{pane_dead},0"* && "$condition" == *"#{pane_pid},$pid"* && "$condition" == *"#{session_name},${managedSessionName}"* && "$condition" == *"#{@omx_pane_instance_id},${instanceId}"* && "$condition" == *"#{@omx_ralph_pane_owner_id},${TEST_RALPH_PANE_OWNER_ID}"* ]]; then
+    receipt="\${thenCommand##*display-message -p }"; receipt="\${receipt%% *}"
+    if [[ "$receipt" =~ ^[a-f0-9]{32}$ && "$thenCommand" == *"; display-message -p $receipt" ]]; then
+      printf '%s\n' "$receipt"
+    fi
   fi
   exit 0
 fi
@@ -500,6 +537,16 @@ if [[ "$cmd" == "display-message" ]]; then
   fi
   if [[ "$format" == "#{pane_in_mode}" ]]; then
     echo "0"
+    exit 0
+  fi
+  if [[ "$format" == *"#{@omx_ralph_pane_owner_id}"* && "$format" == *"#{@omx_pane_instance_id}"* ]]; then
+    paneInstanceId="foreign-pane"
+    if [[ "$target" == "${anchorPane}" || "$target" == "${livePane}" ]]; then paneInstanceId="${instanceId}"; fi
+    if [[ "$target" == "${anchorPane}" ]]; then
+      printf '%s\t0\t9901\t%s\t%s\t%s\r\n' "${anchorPane}" "${managedSessionName}" "$paneInstanceId" "${TEST_RALPH_PANE_OWNER_ID}"
+    else
+      printf '%s\t0\t4201\t%s\t%s\t%s\r\n' "$target" "${managedSessionName}" "$paneInstanceId" "${TEST_RALPH_PANE_OWNER_ID}"
+    fi
     exit 0
   fi
   if [[ "$format" == "#{pane_id}\t#{pane_dead}\t#{pane_pid}" ]]; then
@@ -535,18 +582,9 @@ if [[ "$cmd" == "list-sessions" ]]; then
   exit 0
 fi
 if [[ "$cmd" == "list-panes" ]]; then
-  target=""
-  format=""
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      -F) format="$2"; shift 2 ;;
-      -t) target="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  if [[ "$target" == "${managedSessionName}" ]]; then
-    if [[ "$format" == "#{pane_id}" ]]; then
-      printf '%s\n' ${panes.map((pane) => JSON.stringify(pane.paneId)).join(' ')}
+  if [[ "$*" == *"${managedSessionName}"* ]]; then
+    if [[ "$*" == *"#{pane_id}\t#{pane_current_command}\t#{pane_start_command}"* ]]; then
+      printf '%s\n' "${recoveryPaneOutput}"
     else
       printf '%s\n' "${listPaneOutput}"
     fi
@@ -2353,6 +2391,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 61_000).toISOString(),
@@ -2437,6 +2477,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 5_000).toISOString(),
@@ -2487,6 +2529,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 61_000).toISOString(),
@@ -2772,7 +2816,7 @@ exit 0
     }
   });
 
-  it('rebinds a stale-but-present session-scoped Ralph shell pane to the live pane before continue steer', async () => {
+  it('fails closed instead of rebinding a stale session-scoped Ralph shell pane without exact authority', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-ralph-rebind-stale-anchor-'));
     const fakeBinDir = join(wd, 'fake-bin');
     const stateDir = join(wd, '.omx', 'state');
@@ -2830,22 +2874,20 @@ exit 0
       assert.equal(run.status, 0, run.stderr || run.stdout);
 
       const persistedRalph = JSON.parse(await readFile(ralphStatePath, 'utf-8'));
-      assert.equal(persistedRalph.tmux_pane_id, livePane);
-      assert.match(persistedRalph.tmux_pane_set_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal(persistedRalph.tmux_pane_id, anchorPane);
+      assert.equal(typeof persistedRalph.ralph_expected_authority, 'undefined');
 
       const watcherState = JSON.parse(await readFile(watcherStatePath, 'utf-8'));
-      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'sent');
-      assert.equal(watcherState.ralph_continue_steer?.pane_id, livePane);
-
-      const tmuxLog = await readFile(tmuxLogPath, 'utf8');
-      assert.match(tmuxLog, /paste-buffer -t %42 -b omx-ralph-input-[a-f0-9]+ -p -d/);
-      assert.doesNotMatch(tmuxLog, /paste-buffer -t %99 -b omx-ralph-input-/);
+      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'pane_missing');
+      assert.equal(watcherState.ralph_continue_steer?.pane_id, '');
+      const tmuxLog = await readFile(tmuxLogPath, 'utf8').catch(() => '');
+      assert.doesNotMatch(tmuxLog, /paste-buffer -t %(?:42|99) -b omx-ralph-input-/);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
   });
 
-  it('preserves newer Ralph state fields when a pane rebound happens after the state file advances', async () => {
+  it('does not merge or rebind state that lacks exact Ralph authority', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-ralph-rebind-state-merge-'));
     const fakeBinDir = join(wd, 'fake-bin');
     const stateDir = join(wd, '.omx', 'state');
@@ -2880,7 +2922,7 @@ if [[ "$cmd" == "if-shell" ]]; then
   pid=""
   if [[ "$target" == "${anchorPane}" ]]; then pid="9901"; fi
   if [[ "$target" == "${livePane}" ]]; then pid="4201"; fi
-  if [[ -n "$pid" && "$condition" == *"#{pane_id},$target"* && "$condition" == *"#{pane_dead},0"* && "$condition" == *"#{pane_pid},$pid"* ]]; then
+  if [[ -n "$pid" && "$condition" == *"#{pane_id},$target"* && "$condition" == *"#{pane_dead},0"* && "$condition" == *"#{pane_pid},$pid"* && "$condition" == *"#{@omx_pane_instance_id},${sessionId}"* && "$condition" == *"#{@omx_instance_id},${sessionId}"* ]]; then
     receipt="\${thenCommand##*display-message -p }"; receipt="\${receipt%% *}"; printf '%s\n' "$receipt"
   fi
   exit 0
@@ -2907,6 +2949,14 @@ if [[ "$cmd" == "display-message" ]]; then
     echo "0"
     exit 0
   fi
+  if [[ "$format" == "#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#S\t#{@omx_pane_instance_id}\t#{@omx_instance_id}" ]]; then
+    if [[ "$target" == "${anchorPane}" ]]; then
+      printf '%s\t0\t9901\t%s\t%s\t%s\n' "${anchorPane}" "${managedSessionName}" "${sessionId}" "${sessionId}"
+    else
+      printf '%s\t0\t4201\t%s\t%s\t%s\n' "${livePane}" "${managedSessionName}" "${sessionId}" "${sessionId}"
+    fi
+    exit 0
+  fi
   if [[ "$format" == "#{pane_id}\t#{pane_dead}\t#{pane_pid}" ]]; then
     if [[ "$target" == "${anchorPane}" ]]; then
       printf '%s\t0\t9901\n' "${anchorPane}"
@@ -2931,6 +2981,14 @@ if [[ "$cmd" == "display-message" ]]; then
     echo "bash"
     exit 0
   fi
+  if [[ "$format" == "#{pane_current_command}" && "$target" == "${livePane}" ]]; then
+    echo "codex"
+    exit 0
+  fi
+  if [[ "$format" == "#{pane_start_command}" && "$target" == "${livePane}" ]]; then
+    echo "codex"
+    exit 0
+  fi
   if [[ "$format" == "#S" && "$target" == "${anchorPane}" ]]; then
     echo "${managedSessionName}"
     exit 0
@@ -2938,15 +2996,7 @@ if [[ "$cmd" == "display-message" ]]; then
   exit 0
 fi
 if [[ "$cmd" == "list-panes" ]]; then
-  target=""
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      -F) shift 2 ;;
-      -t) shift; target="$1" ;;
-    esac
-    shift || true
-  done
-  if [[ "$target" == "${managedSessionName}" ]]; then
+  if [[ "$*" == *"${managedSessionName}"* ]]; then
     cat > "${ralphStatePath}" <<'JSON'
 {
   "active": true,
@@ -2956,7 +3006,7 @@ if [[ "$cmd" == "list-panes" ]]; then
   "tmux_pane_id": "%99"
 }
 JSON
-    printf "%%99\t0\tsh\tbash\n%%42\t1\tcodex\tcodex\n"
+    printf "%%99\tsh\tbash\n%%42\tcodex\tcodex\n"
     exit 0
   fi
   echo "can't find session" >&2
@@ -3029,17 +3079,19 @@ exit 0
       assert.equal(run.status, 0, run.stderr || run.stdout);
 
       const persistedRalph = JSON.parse(await readFile(ralphStatePath, 'utf-8'));
-      assert.equal(persistedRalph.tmux_pane_id, livePane);
-      assert.equal(persistedRalph.current_phase, 'reviewing');
-      assert.equal(persistedRalph.iteration, 11);
-      assert.equal(persistedRalph.owner_codex_session_id, 'codex-updated-owner');
-      assert.match(persistedRalph.tmux_pane_set_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
+      assert.equal(persistedRalph.tmux_pane_id, anchorPane);
+      assert.equal(persistedRalph.current_phase, 'executing');
+      assert.equal(persistedRalph.iteration, 1);
+      assert.equal(persistedRalph.owner_codex_session_id, 'codex-stale-owner');
+      assert.equal(typeof persistedRalph.ralph_expected_authority, 'undefined');
+      const watcherState = JSON.parse(await readFile(watcherStatePath, 'utf-8'));
+      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'pane_missing');
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
   });
 
-  it('keeps the verified Ralph anchor pane when another codex pane is focused in the same managed session', async () => {
+  it('fails closed when a Ralph anchor has no exact authority, even with another Codex pane', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-ralph-keep-anchor-pane-'));
     const fakeBinDir = join(wd, 'fake-bin');
     const stateDir = join(wd, '.omx', 'state');
@@ -3097,21 +3149,19 @@ exit 0
 
       const persistedRalph = JSON.parse(await readFile(ralphStatePath, 'utf-8'));
       assert.equal(persistedRalph.tmux_pane_id, anchorPane);
-      assert.equal(typeof persistedRalph.tmux_pane_set_at, 'undefined');
+      assert.equal(typeof persistedRalph.ralph_expected_authority, 'undefined');
 
       const watcherState = JSON.parse(await readFile(watcherStatePath, 'utf-8'));
-      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'sent');
-      assert.equal(watcherState.ralph_continue_steer?.pane_id, anchorPane);
-
-      const tmuxLog = await readFile(tmuxLogPath, 'utf8');
-      assert.match(tmuxLog, /paste-buffer -t %99 -b omx-ralph-input-[a-f0-9]+ -p -d/);
-      assert.doesNotMatch(tmuxLog, /paste-buffer -t %42 -b omx-ralph-input-/);
+      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'pane_missing');
+      assert.equal(watcherState.ralph_continue_steer?.pane_id, '');
+      const tmuxLog = await readFile(tmuxLogPath, 'utf8').catch(() => '');
+      assert.doesNotMatch(tmuxLog, /paste-buffer -t %(?:42|99) -b omx-ralph-input-/);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
   });
 
-  it('rebinds a shell-degraded codex anchor to the live pane before continue steer', async () => {
+  it('fails closed instead of rebinding a shell-degraded Codex anchor without exact authority', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-ralph-rebind-degraded-codex-anchor-'));
     const fakeBinDir = join(wd, 'fake-bin');
     const stateDir = join(wd, '.omx', 'state');
@@ -3168,22 +3218,19 @@ exit 0
       assert.equal(run.status, 0, run.stderr || run.stdout);
 
       const persistedRalph = JSON.parse(await readFile(ralphStatePath, 'utf-8'));
-      assert.equal(persistedRalph.tmux_pane_id, livePane);
-      assert.match(persistedRalph.tmux_pane_set_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
-
+      assert.equal(persistedRalph.tmux_pane_id, anchorPane);
+      assert.equal(typeof persistedRalph.ralph_expected_authority, 'undefined');
       const watcherState = JSON.parse(await readFile(watcherStatePath, 'utf-8'));
-      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'sent');
-      assert.equal(watcherState.ralph_continue_steer?.pane_id, livePane);
-
-      const tmuxLog = await readFile(tmuxLogPath, 'utf8');
-      assert.match(tmuxLog, /paste-buffer -t %42 -b omx-ralph-input-[a-f0-9]+ -p -d/);
-      assert.doesNotMatch(tmuxLog, /paste-buffer -t %99 -b omx-ralph-input-/);
+      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'pane_missing');
+      assert.equal(watcherState.ralph_continue_steer?.pane_id, '');
+      const tmuxLog = await readFile(tmuxLogPath, 'utf8').catch(() => '');
+      assert.doesNotMatch(tmuxLog, /paste-buffer -t %(?:42|99) -b omx-ralph-input-/);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
   });
 
-  it('falls back to the current managed session pane when the stored Ralph pane anchor is dead', async () => {
+  it('fails closed when a stored Ralph pane anchor is dead and lacks exact authority', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-ralph-rebind-dead-anchor-'));
     const fakeBinDir = join(wd, 'fake-bin');
     const stateDir = join(wd, '.omx', 'state');
@@ -3241,19 +3288,13 @@ exit 0
       assert.equal(run.status, 0, run.stderr || run.stdout);
 
       const persistedRalph = JSON.parse(await readFile(ralphStatePath, 'utf-8'));
-      assert.equal(persistedRalph.tmux_pane_id, livePane);
-      assert.match(persistedRalph.tmux_pane_set_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
-
+      assert.equal(persistedRalph.tmux_pane_id, anchorPane);
+      assert.equal(typeof persistedRalph.ralph_expected_authority, 'undefined');
       const watcherState = JSON.parse(await readFile(watcherStatePath, 'utf-8'));
-      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'sent');
-      assert.equal(watcherState.ralph_continue_steer?.pane_id, livePane);
-
-      const tmuxLog = await readFile(tmuxLogPath, 'utf8');
-      assert.match(tmuxLog, /display-message -p -t %99 #{pane_id}\t#{pane_dead}\t#{pane_pid}/);
-      assert.doesNotMatch(tmuxLog, /display-message -p -t %99 #S/);
-      assert.match(tmuxLog, /list-panes -s -t .*sess-ralph-dead-anchor/);
-      assert.match(tmuxLog, /paste-buffer -t %42 -b omx-ralph-input-[a-f0-9]+ -p -d/);
-      assert.doesNotMatch(tmuxLog, /paste-buffer -t %99 -b omx-ralph-input-/);
+      assert.equal(watcherState.ralph_continue_steer?.last_reason, 'pane_missing');
+      assert.equal(watcherState.ralph_continue_steer?.pane_id, '');
+      const tmuxLog = await readFile(tmuxLogPath, 'utf8').catch(() => '');
+      assert.doesNotMatch(tmuxLog, /paste-buffer -t %(?:42|99) -b omx-ralph-input-/);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
@@ -3274,6 +3315,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 61_000).toISOString(),
@@ -3334,6 +3377,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 61_000).toISOString(),
@@ -3447,6 +3492,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 61_000).toISOString(),
@@ -3627,6 +3674,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(stateDir, 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 61_000).toISOString(),
@@ -3711,6 +3760,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(join(wd, '.omx', 'state', 'hud-state.json'), JSON.stringify({
         last_progress_at: new Date(Date.now() - 61_000).toISOString(),
@@ -3745,6 +3796,7 @@ exit 0
       assert.match(watcherState.ralph_continue_steer?.last_error ?? '', /send failed/i);
       const tmuxLog = await readFile(tmuxLogPath, 'utf8');
       assert.match(tmuxLog, /set-buffer -b [^\n]+ -- dispatch ping/);
+      assert.equal(await readFile(`${tmuxLogPath}.buffer`, 'utf8').catch(() => ''), '', 'failed Ralph send must clean up its tmux buffer');
 
       const logPath = join(wd, '.omx', 'logs', `notify-fallback-${new Date().toISOString().split('T')[0]}.jsonl`);
       const logEntries = (await readFile(logPath, 'utf-8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
@@ -3969,6 +4021,8 @@ exit 0
         active: true,
         current_phase: 'executing',
         tmux_pane_id: '%42',
+        owner_omx_session_id: 'ralph-test-owner',
+        ralph_expected_authority: testRalphExpectedAuthority(),
       }, null, 2));
       await writeFile(watcherStatePath, JSON.stringify({
         ralph_continue_steer: {
@@ -4786,7 +4840,7 @@ exit 0
           '--parent-pid',
           String(process.pid),
           '--max-lifetime-ms',
-          '5000',
+          '10000',
         ],
         {
           cwd: wd,
@@ -4802,7 +4856,7 @@ exit 0
         } catch {
           return false;
         }
-      }, 4000, 50);
+      }, 6000, 50);
 
       const freshTurnId = `turn-fresh-${sid}`;
       await appendLine(rolloutPath, {
@@ -4822,7 +4876,7 @@ exit 0
         return watcherState.adaptive_poll?.current_ms === 50
           && watcherState.adaptive_poll?.idle_streak === 0
           && watcherState.adaptive_poll?.last_activity_reason === 'rollout_event';
-      }, 4000, 50);
+      }, 6000, 50);
     } finally {
       if (child && isPidAlive(child.pid)) {
         child.kill('SIGTERM');
@@ -4931,24 +4985,6 @@ setInterval(() => {}, 1000);
 
 });
 
-describe('Ralph fallback atomic input contract', () => {
-  it('uses one receipt-gated literal-buffer mutation with incarnation and managed-owner authority', async () => {
-    const source = await readFile(new URL('../../scripts/notify-fallback-watcher.js', import.meta.url), 'utf-8');
-    const atomicInput = /const mutation = `send-keys -t \$\{canonicalPaneId\} C-u; paste-buffer -t \$\{canonicalPaneId\} -b \$\{bufferName\} -p -d; send-keys -t \$\{canonicalPaneId\} C-m; send-keys -t \$\{canonicalPaneId\} C-m; display-message -p \$\{receipt\}`/;
-    assert.match(source, atomicInput);
-    assert.match(source, /set-buffer', '-b', bufferName, '--', markedText/);
-    assert.match(source, /verified\.stdout !== markedText/);
-    assert.match(source, /randomUUID\(\)\.replace\(\/-\/g, ''\)/);
-    assert.match(source, /parseExactTmuxAuthorityScalar\(result\.stdout\) !== receipt/);
-    assert.match(source, /if-shell', '-t', canonicalPaneId, '-F', authority, mutation, ''/);
-    assert.doesNotMatch(source, /runProcess\('tmux', \['send-keys'/);
-    assert.doesNotMatch(source, /runProcess\('tmux', \['paste-buffer'/);
-    assert.match(source, /#\{pane_pid\}/);
-    assert.match(source, /@omx_pane_instance_id/);
-    assert.match(source, /@omx_instance_id/);
-    assert.doesNotMatch(source, /spawnPlatformCommandSync\('tmux', \['send-keys'/);
-  });
-});
 describe('notify fallback delivery protocol wiring', () => {
   it('routes rollout completions through durable delivery authority before spawning', async () => {
     const source = await readFile(new URL('../../scripts/notify-fallback-watcher.js', import.meta.url), 'utf-8');
