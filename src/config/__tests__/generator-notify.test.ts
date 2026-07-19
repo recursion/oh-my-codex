@@ -88,6 +88,9 @@ describe('config generator', () => {
       assert.match(toml, /role_routing_unavailable/i);
       assert.match(toml, /do not fabricate `agent_type`/i);
       assert.match(toml, /OMX adapted role-pass protocol/i);
+      assert.match(toml, /provenance only/i);
+      assert.match(toml, /does not apply the role TOML model or reasoning effort/i);
+      assert.match(toml, /OMX Team worker/i);
       assert.match(toml, /pre-validated role intent in the OMX subagent ledger/i);
       assert.match(toml, /never fake the role via a prompt label/i);
       assert.match(toml, /Treat installed prompts as narrower execution surfaces under AGENTS\.md authority/);

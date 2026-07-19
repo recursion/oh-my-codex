@@ -75,12 +75,18 @@ describe('adapted role binding', () => {
       assert.equal(state.sessions['session-happy']?.threads['child-happy']?.role, 'architect');
       assert.equal(state.sessions['session-happy']?.threads['child-happy']?.provenance_kind, OMX_ADAPTED_PROVENANCE);
       assert.deepEqual(state.pending_role_intents, []);
-      assert.equal(readRoleRoutingMarker(stateDir, {
+      const marker = readRoleRoutingMarker(stateDir, {
         cwd,
         sessionId: 'session-happy',
         parentThreadId: 'parent-happy',
         nowMs: NOW_MS,
-      })?.evidence, 'validated OMX adapted role intent correlated to an untyped native child');
+      });
+      assert.equal(marker?.routing_mode, 'provenance_only');
+      assert.equal(marker?.requested_role, 'architect');
+      assert.equal(
+        marker?.evidence,
+        'OMX adapted role intent attributed requested role architect to an untyped native child; model and reasoning effort were not applied',
+      );
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

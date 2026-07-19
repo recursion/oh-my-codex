@@ -30,6 +30,10 @@ describe('ralph goal mode integration contract', () => {
     assert.match(ralphSkill, /role_routing_unavailable/);
     assert.match(ralphSkill, /do not fabricate `agent_type`/);
     assert.match(ralphSkill, /OMX adapted role-pass protocol/);
+    assert.match(ralphSkill, /provenance only/i);
+    assert.match(ralphSkill, /does not apply the role TOML model or reasoning effort/i);
+    assert.match(ralphSkill, /OMX Team worker/i);
+    assert.match(ralphSkill, /requested_route.*observed_route/i);
     assert.match(ralphSkill, /pre-validated role intent in the OMX subagent ledger/);
     assert.match(ralphSkill, /never fake the role via a prompt label/);
     assert.doesNotMatch(ralphSkill, /delegate\(role=/);

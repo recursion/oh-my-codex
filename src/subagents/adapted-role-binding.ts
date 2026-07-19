@@ -26,6 +26,7 @@ function buildAdaptedRoleRoutingMarker(
   cwd: string,
   sessionId: string,
   parentThreadId: string,
+  requestedRole: string,
   nowMs: number,
 ): RoleRoutingUnavailableMarker {
   return {
@@ -33,9 +34,11 @@ function buildAdaptedRoleRoutingMarker(
     cwd: canonicalizeOriginCwd(cwd) ?? cwd,
     session_id: sessionId,
     parent_thread_id: parentThreadId,
+    routing_mode: 'provenance_only',
+    requested_role: requestedRole,
     observed_at: new Date(nowMs).toISOString(),
     expires_at: new Date(nowMs + NATIVE_SUBAGENT_ROLE_ROUTING_MARKER_TTL_MS).toISOString(),
-    evidence: 'validated OMX adapted role intent correlated to an untyped native child',
+    evidence: `OMX adapted role intent attributed requested role ${requestedRole} to an untyped native child; model and reasoning effort were not applied`,
   };
 }
 
@@ -54,7 +57,7 @@ export function recoverAdaptedRoleBindings(cwd: string, stateDir: string, nowMs?
       if (Object.hasOwn(intent, 'binding_claimant_token') && !isCanonicalClaimantToken(intent.binding_claimant_token)) continue;
       writeRoleRoutingMarker(
         stateDir,
-        buildAdaptedRoleRoutingMarker(cwd, intent.session_id, intent.parent_thread_id, normalizedNowMs),
+        buildAdaptedRoleRoutingMarker(cwd, intent.session_id, intent.parent_thread_id, intent.role, normalizedNowMs),
       );
       completeAdaptedRoleBinding(cwd, {
         sessionId: intent.session_id,
@@ -92,7 +95,7 @@ export function bindAndPublishAdaptedRole(
 
   writeRoleRoutingMarker(
     stateDir,
-    buildAdaptedRoleRoutingMarker(cwd, input.correlationSessionId, input.parentThreadId, nowMs),
+    buildAdaptedRoleRoutingMarker(cwd, input.correlationSessionId, input.parentThreadId, binding.role, nowMs),
   );
   completeAdaptedRoleBinding(cwd, {
     sessionId: input.correlationSessionId,

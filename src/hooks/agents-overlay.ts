@@ -283,8 +283,8 @@ async function readProjectMemorySummary(cwd: string): Promise<string> {
 function getNativeSubagentRoutingInstructions(): string {
   return [
     "When the native surface exposes `agent_type` role routing, set `agent_type` to an installed OMX role and never omit it for OMX work.",
-    "On that routing-capable surface, use the most specific role (`architect`, `code-reviewer`, `critic`, `planner`, `debugger`, etc.); use `executor` only for generic implementation work.",
-    "When it does not (`role_routing_unavailable`, for example a Codex App `spawn_agent` surface exposing only `task_name`, `message`, and `fork_turns`), do not fabricate `agent_type`; follow the OMX adapted role-pass protocol by recording a pre-validated role intent in the OMX subagent ledger, and never fake the role via a prompt label.",
+    "Use the narrowest specific role; use `executor` only for generic implementation.",
+    "On `role_routing_unavailable`, do not fabricate `agent_type`: the OMX adapted role-pass protocol is provenance only and does not apply the role TOML model or reasoning effort. Record the pre-validated role intent in the OMX subagent ledger, never fake the role via a prompt label, and separate `requested_route` from `observed_route`. For exact routing use an OMX Team worker; otherwise report the mismatch or blocker.",
   ].join("\n");
 }
 

@@ -14,7 +14,8 @@ export const RALPLAN_HELP = `omx ralplan - RALPLAN consensus support commands
 Usage:
   omx ralplan role-intent write --role <role> --parent-thread <id> [--session <id>] [--ttl-ms <n>] [--json]
 
-role-intent write records the validated role required by the next adapted native spawn.
+role-intent write records provenance for the requested role on the next untyped adapted spawn.
+It does not apply the role TOML model or reasoning effort.
 `;
 
 type RoleIntentFailureReason = 'unknown_role' | 'invalid_correlation_token' | 'invalid_origin' | 'single_flight_conflict' | 'session_not_current' | 'parent_not_active_leader' | 'spawn_task_name_unsupported' | 'native_anchor_unavailable' | 'native_anchor_mismatch';

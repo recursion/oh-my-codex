@@ -33,7 +33,7 @@ Complex tasks often fail silently: partial implementations get declared "done", 
 - Fire independent agent calls simultaneously -- never wait sequentially for independent work
 - Use `run_in_background: true` for long operations (installs, builds, test suites)
 - When the native surface exposes `agent_type` role routing, set `agent_type` to an installed OMX role and never omit it for OMX work; use `reasoning_effort` for per-dispatch intensity when needed
-- When it does not (`role_routing_unavailable`, for example a Codex App `spawn_agent` surface exposing only `task_name`, `message`, and `fork_turns`), do not fabricate `agent_type`; follow the OMX adapted role-pass protocol by recording a pre-validated role intent in the OMX subagent ledger, and never fake the role via a prompt label
+- When it does not (`role_routing_unavailable`), do not fabricate `agent_type`: the OMX adapted role-pass protocol is provenance only and does not apply the role TOML model or reasoning effort. Record a pre-validated role intent in the OMX subagent ledger, never fake the role via a prompt label, and keep `requested_route` separate from `observed_route`. When exact routing is required, use an OMX Team worker or report the route blocker.
 - Preserve legacy Ralph tier intent through native reasoning effort: LOW -> `low`, STANDARD -> `medium`, THOROUGH -> `xhigh`
 - Deliver the full implementation: no scope reduction, no partial completion, no deleting tests to make them pass
 - Apply the shared workflow guidance pattern: outcome-first framing, concise visible updates for multi-step execution, local overrides for the active workflow branch, validation proportional to risk, explicit stop rules, and automatic continuation for safe reversible steps. Ask only for material, destructive, credentialed, external-production, or preference-dependent branches.
@@ -78,7 +78,7 @@ Complex tasks often fail silently: partial implementations get declared "done", 
    - Standard changes: `task(agent_type="architect", reasoning_effort="medium", prompt="...")`
    - >20 files or security/architectural changes: `task(agent_type="architect", reasoning_effort="xhigh", prompt="...")`
    - Ralph floor: always run an explicit `architect` native subagent, even for small changes
-   - On a `role_routing_unavailable` surface, before each App Architect spawn, run `omx ralplan role-intent write --role architect --parent-thread <leader-thread-id> --json`; read `spawn_task_name` from its receipt (`omx_role_intent_<correlation_token>`), the App-compatible `task_name` value (lowercase letters, digits, and underscores only), then spawn the App Architect with `task_name` set to that exact unmodified value, **not** `agent_nickname`. The recorded validated intent and correlation token are the authoritative role carrier, never a prompt label.
+   - On a `role_routing_unavailable` surface, an adapted App spawn is attribution only and does not satisfy the configured Architect model/effort. Use an OMX Team worker for route-correct Architect verification. If exact routing is not required, run `omx ralplan role-intent write --role architect --parent-thread <leader-thread-id> --json`, use its exact `spawn_task_name` as `task_name`, and report the inherited/observed route separately.
 7.5 **Mandatory Deslop Pass**:
    - After Step 7 passes, run `oh-my-codex:ai-slop-cleaner` on **all files changed during the Ralph session**.
    - Scope the cleaner to **changed files only**; do not widen the pass beyond Ralph-owned edits.
@@ -202,7 +202,7 @@ Why bad: These are independent tasks that should run in parallel, not sequential
 - [ ] Fresh test run output shows all tests pass
 - [ ] Fresh build output shows success
 - [ ] lsp_diagnostics shows 0 errors on affected files
-- [ ] Architect verification passed: on a routing-capable surface via explicit `task(agent_type="architect", reasoning_effort="medium"...)` minimum; on a `role_routing_unavailable` surface via a validated OMX-adapted Architect role-pass (pre-recorded role intent + `omx_adapted` provenance in the subagent ledger)
+- [ ] Architect verification passed through a route-capable native Architect or an OMX Team Architect worker; adapted `omx_adapted` provenance alone does not prove the configured model/effort
 - [ ] Codex goal-mode completion audit passed, and `update_goal({status: "complete"})` was called when an active goal exists
 - [ ] ai-slop-cleaner pass completed on changed files (or --no-deslop specified)
 - [ ] Post-deslop regression tests pass

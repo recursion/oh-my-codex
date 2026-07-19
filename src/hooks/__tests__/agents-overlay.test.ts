@@ -74,6 +74,10 @@ describe("generateOverlay", () => {
     assert.match(overlay, /OMX adapted role-pass protocol/i);
     assert.match(overlay, /pre-validated role intent in the OMX subagent ledger/i);
     assert.match(overlay, /never fake the role via a prompt label/i);
+    assert.match(overlay, /provenance only/i);
+    assert.match(overlay, /does not apply the role TOML model or reasoning effort/i);
+    assert.match(overlay, /OMX Team worker/i);
+    assert.match(overlay, /requested_route.*observed_route/i);
   });
 
   it("includes the team orchestrator overlay only when orchestration mode is team", async () => {

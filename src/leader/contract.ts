@@ -103,6 +103,8 @@ export interface NativeSubagentSupportEvidence {
   reason?: NativeSubagentUnsupportedReason;
   source: NativeSubagentSupportEvidenceSource;
   evidenceSummary?: string;
+  routingMode?: 'provenance_only';
+  requestedRole?: string;
   observedAt?: string;
   expiresAt?: string;
 }
@@ -112,6 +114,8 @@ export interface RoleRoutingUnavailableMarker {
   cwd?: string;
   session_id?: string;
   parent_thread_id?: string;
+  routing_mode?: 'provenance_only';
+  requested_role?: string;
   observed_at: string;
   expires_at: string;
   evidence?: string;
@@ -145,10 +149,11 @@ export const LEADER_CONDUCTOR_UNSUPPORTED_NATIVE_DEGRADE_BLOCK = [
 
 export const LEADER_CONDUCTOR_ROLE_ROUTING_DEGRADE_BLOCK = [
   'Native role routing is unavailable in this environment.',
-  'PROCEED with adapted role-specific consensus using the exposed spawn tool.',
-  'Record role identity via the OMX adapted role-intent ledger.',
-  'Keep unknown-role validation loud.',
-  'Continue the workflow without claiming native typed-subagent provenance.',
+  'The OMX adapted role-intent ledger is provenance only: it records the requested role after an untyped spawn and does not apply the role TOML model or reasoning effort.',
+  'Never claim that an adapted child satisfied the requested model or effort.',
+  'When exact routing is required, use an OMX Team worker or another launcher that passes explicit model and reasoning settings; if none is available, report the route mismatch or blocker.',
+  'Use the exposed untyped spawn tool only when inherited routing is acceptable, and record requested_route separately from observed_route.',
+  'Keep unknown-role validation loud and never claim native typed-subagent provenance for an adapted child.',
 ].join(' ');
 
 function supportRecord(value: unknown): Record<string, unknown> | null {
@@ -255,6 +260,8 @@ function roleRoutingUnavailableEvidenceFromMarker(
     status: 'role_routing_unavailable',
     source: 'persisted_role_routing_marker',
     ...(supportString(record.evidence ?? record.evidenceSummary) ? { evidenceSummary: supportString(record.evidence ?? record.evidenceSummary) } : {}),
+    ...(record.routing_mode === 'provenance_only' ? { routingMode: 'provenance_only' as const } : {}),
+    ...(supportString(record.requested_role ?? record.requestedRole) ? { requestedRole: supportString(record.requested_role ?? record.requestedRole) } : {}),
     observedAt,
     expiresAt,
   };

@@ -36,11 +36,14 @@ function normalizeMarker(value: unknown): RoleRoutingUnavailableMarker | null {
   const cwd = readString(candidate.cwd);
   const parentThreadId = readString(candidate.parent_thread_id);
   const evidence = readString(candidate.evidence);
+  const requestedRole = readString(candidate.requested_role);
   return {
     schema_version: ROLE_ROUTING_MARKER_SCHEMA_VERSION,
     ...(cwd ? { cwd } : {}),
     session_id: sessionId,
     ...(parentThreadId ? { parent_thread_id: parentThreadId } : {}),
+    ...(candidate.routing_mode === 'provenance_only' ? { routing_mode: 'provenance_only' as const } : {}),
+    ...(requestedRole ? { requested_role: requestedRole } : {}),
     observed_at: observedAt,
     expires_at: expiresAt,
     ...(evidence ? { evidence } : {}),

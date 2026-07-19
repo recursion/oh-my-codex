@@ -293,6 +293,10 @@ describe('ralph deslop launch wiring', () => {
     assert.match(instructions, /OMX adapted role-pass protocol/);
     assert.match(instructions, /pre-validated role intent in the OMX subagent ledger/);
     assert.match(instructions, /never fake the role via a prompt label/);
+    assert.match(instructions, /provenance only/i);
+    assert.match(instructions, /does not apply the role TOML model or reasoning effort/i);
+    assert.match(instructions, /OMX Team worker/i);
+    assert.match(instructions, /requested_route.*observed_route/i);
     assert.match(instructions, /use `reasoning_effort` instead of `tier`/);
     assert.match(instructions, /LOW -> `low`/);
     assert.match(instructions, /STANDARD -> `medium`/);

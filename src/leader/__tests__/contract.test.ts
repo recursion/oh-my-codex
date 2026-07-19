@@ -159,6 +159,8 @@ describe('leader conductor contract', () => {
       cwd: '/repo',
       session_id: 'sess-1',
       parent_thread_id: 'parent-1',
+      routing_mode: 'provenance_only',
+      requested_role: 'planner',
       observed_at: '2026-07-09T00:00:00.000Z',
       expires_at: '2026-07-10T00:00:00.000Z',
       evidence: 'spawn tool accepted no native role routing',
@@ -172,20 +174,23 @@ describe('leader conductor contract', () => {
     assert.equal(markerEvidence.status, 'role_routing_unavailable');
     assert.equal(markerEvidence.source, 'persisted_role_routing_marker');
     assert.equal(markerEvidence.evidenceSummary, marker.evidence);
+    assert.equal(markerEvidence.routingMode, 'provenance_only');
+    assert.equal(markerEvidence.requestedRole, 'planner');
   });
 
-  it('renders role-routing guidance that proceeds without terminal wording', () => {
+  it('renders role-routing guidance that treats adapted role intent as provenance only', () => {
     const guidance = buildRoleRoutingUnavailableGuidance({
       status: 'role_routing_unavailable',
       source: 'persisted_role_routing_marker',
       evidenceSummary: 'spawn tool accepted no native role routing',
     });
-    assert.match(guidance, /PROCEED/);
+    assert.match(guidance, /provenance only/i);
     assert.match(guidance, /role-intent ledger/);
+    assert.match(guidance, /does not apply.*model.*reasoning effort/i);
+    assert.match(guidance, /OMX Team worker/i);
+    assert.match(guidance, /requested_route.*observed_route/i);
     assert.match(guidance, /Evidence: spawn tool accepted no native role routing/);
-    assert.doesNotMatch(guidance, /blocked\/cancelled\/failed/);
-    assert.doesNotMatch(guidance, /terminalize/);
-    assert.doesNotMatch(LEADER_CONDUCTOR_ROLE_ROUTING_DEGRADE_BLOCK, /blocked\/cancelled\/failed|terminalize/);
+    assert.match(guidance, /report the route mismatch or blocker/i);
   });
 
   it('recognizes namespaced collaboration spawn tools and rejects near-miss names (#3119)', () => {
