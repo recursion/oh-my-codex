@@ -98,12 +98,14 @@ function withMockedExistsSync<T>(mock: typeof fs.existsSync, fn: () => T): T {
 }
 
   describe('shared tmux authority framing', () => {
-    it('rejects truncated, CR, and multiply-terminated Team authority observations', () => {
+    it('accepts one LF or CRLF terminator and rejects truncated, bare-CR, and multiply-terminated Team authority observations', () => {
       assert.deepEqual(parseExactTmuxAuthorityLines('%1 0 101\n%2 0 202\n'), ['%1 0 101', '%2 0 202']);
-      for (const malformed of ['%1 0 101', '%1 0 101\r\n', '%1 0 101\r', '%1 0 101\n\n', '%1 0 101\n%2 0 202']) {
+      assert.deepEqual(parseExactTmuxAuthorityLines('%1 0 101\n%2 0 202\r\n'), ['%1 0 101', '%2 0 202']);
+      for (const malformed of ['%1 0 101', '%1 0 101\r', '%1 0 101\n\n', '%1 0 101\r\n\r\n', '%1 0 101\n%2 0 202']) {
         assert.equal(parseExactTmuxAuthorityLines(malformed), null, JSON.stringify(malformed));
       }
       assert.equal(parseExactTmuxAuthorityScalar('%1\n'), '%1');
+      assert.equal(parseExactTmuxAuthorityScalar('%1\r\n'), '%1');
       assert.equal(parseExactTmuxAuthorityScalar('%1\n%2\n'), null);
     });
   });

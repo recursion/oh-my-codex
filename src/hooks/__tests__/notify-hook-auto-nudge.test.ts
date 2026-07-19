@@ -837,7 +837,7 @@ exit 0
     });
   });
 
-  it('keeps a verified codex anchor from active mode state even when a sibling codex pane is focused', async () => {
+  it('falls back from an incompletely verified codex anchor to the focused managed codex pane', async () => {
     await withTempWorkingDir(async (cwd) => {
       const omxDir = join(cwd, '.omx');
       const stateDir = join(omxDir, 'state');
@@ -862,6 +862,16 @@ exit 0
       await writeJson(join(sessionStateDir, 'ralph-state.json'), {
         active: true,
         tmux_pane_id: '%99',
+        tmux_pane_pid: 4242,
+        tmux_session_name: managedSessionName,
+        tmux_pane_owner_id: 'ralph:123e4567-e89b-12d3-a456-426614174000',
+        ralph_expected_authority: {
+          pane_id: '%99',
+          pane_pid: 4242,
+          session_name: managedSessionName,
+          pane_instance_id: 'sess-managed',
+          pane_owner_id: 'ralph:123e4567-e89b-12d3-a456-426614174000',
+        },
       });
 
       const fakeTmux = `#!/usr/bin/env bash
@@ -889,8 +899,12 @@ if [[ "$cmd" == "display-message" ]]; then
       *) format="$1"; shift ;;
     esac
   done
-  if [[ "$format" == "#{pane_id}\t#{pane_dead}\t#{pane_pid}" ]]; then
+  if [[ "$format" == $'#{pane_id}\t#{pane_dead}\t#{pane_pid}' ]]; then
     printf '%s\t0\t4242\n' "$target"
+    exit 0
+  fi
+  if [[ "$format" == $'#{pane_id}\t#{pane_dead}\t#{pane_pid}\t#{session_name}\t#{@omx_pane_instance_id}\t#{@omx_ralph_pane_owner_id}' && "$target" == "%99" ]]; then
+    printf '%%99\t0\t4242\t%s\tsess-managed\tralph:123e4567-e89b-12d3-a456-426614174000\n' "${managedSessionName}"
     exit 0
   fi
   if [[ "$format" == "#S" && ( "$target" == "%99" || "$target" == "%100" ) ]]; then
@@ -988,8 +1002,8 @@ exit 0
       assert.equal(result.status, 0, `hook failed: ${result.stderr || result.stdout}`);
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-      assert.match(tmuxLog, defaultAutoNudgePattern('%99'), 'should keep the verified codex anchor');
-      assert.doesNotMatch(tmuxLog, defaultAutoNudgePattern('%100'), 'should not jump to the focused sibling codex pane');
+      assert.match(tmuxLog, defaultAutoNudgePattern('%100'), 'should use the focused pane with complete managed authority');
+      assert.doesNotMatch(tmuxLog, defaultAutoNudgePattern('%99'), 'should not trust the incomplete stored anchor');
     });
   });
 

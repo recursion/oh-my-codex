@@ -30,7 +30,7 @@ describe('Windows popup loop contracts', () => {
     assert.match(notifierSource, /execFileAsync\(cmd,\s*args,\s*\{\s*windowsHide:\s*true\s*\}\)/);
     assert.match(replyListenerSource, /spawn\('node',\s*\['-e',\s*daemonScript\],\s*\{[\s\S]*?windowsHide:\s*true/);
     assert.match(fallbackWatcherSource, /checkPaneReadyForTeamSendKeys\(paneId\)/);
-    assert.match(fallbackWatcherSource, /display-message', '-p', '-t', canonicalPaneId, '#\{pane_id\}\\t#\{pane_dead\}\\t#\{pane_pid\}'/);
+    assert.match(fallbackWatcherSource, /display-message', '-p', '-t', expected\.paneId, '#\{pane_id\}\\t#\{pane_dead\}\\t#\{pane_pid\}\\t#\{session_name\}\\t#\{@omx_pane_instance_id\}\\t#\{@omx_ralph_pane_owner_id\}'/);
     assert.match(fallbackWatcherSource, /set-buffer', '-b', bufferName, '--', markedText/);
     assert.match(fallbackWatcherSource, /show-buffer', '-b', bufferName/);
     assert.match(fallbackWatcherSource, /if-shell', '-t', canonicalPaneId, '-F', authority, mutation, ''/);

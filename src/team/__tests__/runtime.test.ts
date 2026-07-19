@@ -768,9 +768,10 @@ if (args[0] === 'if-shell' && args.includes('-F')) {
   const formatIndex = args.indexOf('-F');
   const targetIndex = args.indexOf('-t');
   const targetPaneId = targetIndex >= 0 ? args[targetIndex + 1] : undefined;
-  const condition = args[formatIndex + 1] ?? '';
-  const success = args[formatIndex + 2] ?? '';
-  const rejected = args[formatIndex + 3] ?? '';
+  const conditionIndex = Math.max(formatIndex + 1, targetIndex >= 0 ? targetIndex + 2 : 1);
+  const condition = args[conditionIndex] ?? '';
+  const success = args[conditionIndex + 1] ?? '';
+  const rejected = args[conditionIndex + 2] ?? '';
   const branch = evaluatePaneCondition(condition, targetPaneId) ? success : rejected;
   if (!branch) process.exit(0);
   const result = executeTmuxCommand(branch);
@@ -5288,7 +5289,7 @@ exit 0
           assert.ok((tmuxLog.match(new RegExp(`run-shell .*resize-pane -t %(?:3|4|5) -y ${HUD_TMUX_TEAM_HEIGHT_LINES}`, 'g'))?.length ?? 0) >= 2);
           assert.ok((tmuxLog.match(/select-layout -t leader:0 main-vertical/g)?.length ?? 0) >= 2);
           assert.match(tmuxLog, /if-shell -F -t %3 .*kill-pane -t %3.*__OMX_PANE_MUTATION_[a-f0-9]+__/);
-          assert.doesNotMatch(tmuxLog, /if-shell -F -t %4 .*__OMX_PANE_MUTATION_[a-f0-9]+__/);
+          assert.match(tmuxLog, /if-shell -F -t %4 .*kill-pane -t %4.*__OMX_PANE_MUTATION_[a-f0-9]+__/);
         },
       );
     } finally {
@@ -7518,6 +7519,13 @@ case "$1" in
     ;;
   list-panes)
     case "$*" in
+      *"-a -F #{pane_id} #{pane_dead} #{pane_pid}"*)
+        printf "%%11 0 2000001011\n"
+        if [ "$(cat "$team_hud_state")" = "present" ]; then printf "%%12 0 2000001012\n"; fi
+        printf "%%13 0 2000001013\n%%14 0 2000001014\n%%15 0 2000001015\n%%16 0 2000001016\n%%17 0 2000001017\n%%18 0 2000001018\n%%19 0 2000001019\n%%20 0 2000001020\n%%21 0 2000001021\n%%22 0 2000001022\n%%23 0 2000001023\n%%24 0 2000001024\n%%25 0 2000001025\n"
+        if [ -f "$restored_marker" ]; then printf "%%44 0 2000001044\n"; fi
+        exit 0
+        ;;
       *"-t leader:0 -F #{pane_dead} #{pane_pid}"*)
         exit 1
         ;;
@@ -7616,7 +7624,6 @@ esac
           assert.doesNotMatch(tmuxLog, /kill-pane -t %24/);
           assert.doesNotMatch(tmuxLog, /kill-pane -t %25/);
           assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %11 -d -P -F #\{pane_id\}`));
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %44/);
         },
       );
     } finally {
@@ -7781,7 +7788,7 @@ esac
           assert.match(tmuxLog, /kill-pane -t %14/);
           assert.doesNotMatch(tmuxLog, /kill-session -t leader:0/);
           assert.match(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %10 -d -P -F #\\{pane_id\\}`));
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %44/);
+          assert.match(tmuxLog, /if-shell -F -t %44 .*kill-pane -t %44.*__OMX_PANE_MUTATION_[a-f0-9]+__/);
           assert.match(tmuxLog, /if-shell -F -t %12 .*kill-pane -t %12.*__OMX_PANE_MUTATION_[a-f0-9]+__/);
         },
       );
@@ -8670,7 +8677,7 @@ esac
           assert.equal(count(/if-shell -F -t %12 .*__OMX_PANE_MUTATION_[a-f0-9]+__/g), 1);
           assert.match(tmuxLog, /run-shell -b sleep \d+; tmux if-shell -F -t %11/);
           assert.doesNotMatch(tmuxLog, new RegExp(`split-window -v -l ${HUD_TMUX_TEAM_HEIGHT_LINES} -t %11 -d -P -F #\\{pane_id\\} -c ${escapeRegExp(cwd)} `));
-          assert.doesNotMatch(tmuxLog, /kill-pane -t %44/);
+          assert.match(tmuxLog, /if-shell -F -t %44 .*kill-pane -t %44.*__OMX_PANE_MUTATION_[a-f0-9]+__/);
         },
       );
     } finally {

@@ -513,7 +513,8 @@ if [[ "$cmd" == "if-shell" ]]; then
     duplicate) printf '%s\n%s\n' "$receipt" "$receipt" ;;
     extra) printf 'prefix%s\n' "$receipt" ;;
     truncated) printf '%s' "$receipt" ;;
-    cr) printf '%s\r\n' "$receipt" ;;
+    crlf) printf '%s\r\n' "$receipt" ;;
+    bare_cr) printf '%s\r' "$receipt" ;;
     *) exit 1 ;;
   esac
   exit 0
@@ -524,7 +525,11 @@ exit 0
         process.env.PATH = `${fakeBinDir}:${previousPath || ''}`;
         process.env.OMX_TEST_TMUX_LOG = logPath;
         const sdk = createHookPluginSdk({ cwd, pluginName: 'strict-receipt', event: makeEvent(), sideEffectsEnabled: true });
-        for (const malformed of ['wrong', 'duplicate', 'extra', 'truncated', 'cr']) {
+        process.env.OMX_TEST_RECEIPT_OUTPUT = 'crlf';
+        const crlfResult = await sdk.tmux.sendKeys({ text: 'receipt-crlf', paneId: '%42', cooldownMs: 0, submit: false });
+        assert.equal(crlfResult.ok, true, 'CRLF-terminated receipts are accepted');
+        await writeFile(logPath, '');
+        for (const malformed of ['wrong', 'duplicate', 'extra', 'truncated', 'bare_cr']) {
           process.env.OMX_TEST_RECEIPT_OUTPUT = malformed;
           const result = await sdk.tmux.sendKeys({ text: `receipt-${malformed}`, paneId: '%42', cooldownMs: 0, submit: false });
           assert.equal(result.ok, false, malformed);
