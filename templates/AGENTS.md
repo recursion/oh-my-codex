@@ -86,6 +86,7 @@ Rules: max 6 concurrent child agents; child prompts remain under AGENTS.md autho
 
 <model_routing>
 Match role to task shape: `explore` for repo lookup, `researcher` for official docs/reference gathering, `dependency-expert` for SDK/package decisions, `executor` for implementation, `debugger` for root cause, `architect`/`critic` for high-complexity review. Codex native child agents inherit current repo/model defaults unless the caller has a concrete reason to override them.
+When a native surface cannot accept `agent_type`, OMX adapted role intent is provenance only: it does not apply the requested role TOML model or reasoning effort. Keep `requested_route` separate from runtime-backed `observed_route`, never report an adapted child as an exact route match, and use an OMX Team worker or another role-aware launcher when exact routing is required.
 </model_routing>
 
 <specialist_routing>

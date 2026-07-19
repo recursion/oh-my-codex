@@ -416,6 +416,12 @@ describe('omx setup AGENTS refresh behavior', () => {
       assert.match(agentsContent, new RegExp(OMX_MANAGED_AGENTS_END_MARKER));
       assert.match(agentsContent, /<!-- omx:generated:agents-md -->/);
       assert.match(agentsContent, /# oh-my-codex - Intelligent Multi-Agent Orchestration/);
+      assert.match(agentsContent, /adapted role intent is provenance only/);
+      assert.match(agentsContent, /does not apply the requested role TOML model or reasoning effort/);
+      assert.match(agentsContent, /requested_route/);
+      assert.match(agentsContent, /observed_route/);
+      assert.match(agentsContent, /never report an adapted child as an exact route match/);
+      assert.match(agentsContent, /OMX Team worker/);
       assert.equal(existsSync(join(home, '.omx', 'backups', 'setup')), true);
     } finally {
       restoreHome();
