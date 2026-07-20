@@ -50,6 +50,10 @@ export interface RalplanReviewResult {
   agent_role?: 'architect' | 'critic';
   lane_id?: string;
   tracker_path?: string;
+  /** Required for `omx_adapted`: copied exactly from this lane's tracker receipt. */
+  adapted_policy_id?: string;
+  /** Required for `omx_adapted`: copied exactly from this lane's tracker receipt. */
+  adapted_receipt_signature?: string;
   new_lane_reason?: string;
   sequence_index?: number;
 }

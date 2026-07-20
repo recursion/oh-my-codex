@@ -1,8 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync, writeFileSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +22,18 @@ function runOmx(
   const testDir = dirname(fileURLToPath(import.meta.url));
   const repoRoot = join(testDir, '..', '..', '..');
   const omxBin = join(repoRoot, 'dist', 'cli', 'omx.js');
-  const result = spawnSync(process.execPath, [omxBin, ...argv], {
+  const nativeAnchorHome = envOverrides.HOME || join(cwd, 'native-anchor-os-home');
+  const preloadPath = join(cwd, 'native-anchor-user-info-preload.cjs');
+  writeFileSync(preloadPath, [
+    "const os = require('node:os');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const home = process.env.OMX_TEST_NATIVE_ANCHOR_HOME;",
+    "if (!home) throw new Error('missing test native anchor home');",
+    "os.userInfo = () => ({ username: 'omx-test', uid: 1, gid: 1, shell: '', homedir: home });",
+    'syncBuiltinESMExports();',
+    '',
+  ].join('\n'));
+  const result = spawnSync(process.execPath, ['--require', preloadPath, omxBin, ...argv], {
     cwd,
     encoding: 'utf-8',
     env: {
@@ -31,6 +43,7 @@ function runOmx(
       OMX_TEAM_WORKER: '',
       OMX_TEAM_STATE_ROOT: '',
       OMX_TEAM_LEADER_CWD: '',
+      OMX_TEST_NATIVE_ANCHOR_HOME: nativeAnchorHome,
       ...envOverrides,
     },
   });
@@ -347,7 +360,7 @@ describe('omx exec', () => {
       await mkdir(fakeBin, { recursive: true });
       await writeFile(join(fakeBin, 'codex'), [
         '#!/bin/sh',
-        `exec "$NODE_BINARY" -e 'require("node:fs").writeFileSync(process.env.OMX_FAKE_CODEX_CAPTURE_PATH, JSON.stringify({ launchId: process.env.OMX_CODEX_LAUNCH_ID, entryPath: process.env.OMX_ENTRY_PATH, sessionId: process.env.OMX_SESSION_ID, omxRoot: process.env.OMX_ROOT, path: process.env.PATH }))'`,
+        `exec "$NODE_BINARY" -e 'require("node:fs").writeFileSync(process.env.OMX_FAKE_CODEX_CAPTURE_PATH, JSON.stringify({ launchId: process.env.OMX_CODEX_LAUNCH_ID, launchToken: process.env.OMX_CODEX_LAUNCH_TOKEN, entryPath: process.env.OMX_ENTRY_PATH, sessionId: process.env.OMX_SESSION_ID, omxRoot: process.env.OMX_ROOT, path: process.env.PATH }))'`,
         '',
       ].join('\n'));
       await chmod(join(fakeBin, 'codex'), 0o755);
@@ -361,9 +374,102 @@ describe('omx exec', () => {
       assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
       const captured = JSON.parse(await readFile(capturePath, 'utf8')) as Record<string, string>;
       assert.match(captured.launchId, /^[0-9a-f-]{36}$/i);
+      assert.match(captured.launchToken, /^[a-f0-9]{64}$/);
       assert.match(captured.entryPath, /dist\/cli\/omx\.js$/);
       assert.match(captured.sessionId, /^omx-/);
       assert.ok(captured.path.split(':').some((entry) => entry.includes('.omx') && entry.includes('bin')));
+      const authorization = JSON.parse(await readFile(
+        join(home, '.omx', 'native-anchor-auth', 'v1', 'launch-authorizations', `${captured.launchId}.json`),
+        'utf8',
+      )) as Record<string, string>;
+      assert.equal(authorization.launchId, captured.launchId);
+      assert.equal(authorization.sessionId, captured.sessionId);
+      assert.equal(authorization.tokenSha256, createHash('sha256').update(captured.launchToken).digest('hex'));
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ordinary interactive omx launch', () => {
+  it('issues a matching authorization manifest before starting Codex', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-interactive-launch-auth-'));
+    try {
+      const home = join(wd, 'home');
+      const fakeBin = join(wd, 'bin');
+      const capturePath = join(wd, 'interactive-launch-env.json');
+      const captureScriptPath = join(wd, 'capture-codex-launch.mjs');
+      await mkdir(home, { recursive: true });
+      await mkdir(fakeBin, { recursive: true });
+      await writeFile(captureScriptPath, [
+        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+        "import { join } from 'node:path';",
+        "const launchId = process.env.OMX_CODEX_LAUNCH_ID;",
+        "const authorizationPath = launchId ? join(process.env.HOME, '.omx', 'native-anchor-auth', 'v1', 'launch-authorizations', `${launchId}.json`) : '';",
+        'const authorizationExistsAtLaunch = Boolean(authorizationPath && existsSync(authorizationPath));',
+        "const authorization = authorizationExistsAtLaunch ? JSON.parse(readFileSync(authorizationPath, 'utf8')) : null;",
+        "writeFileSync(process.env.OMX_FAKE_CODEX_CAPTURE_PATH, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), launchId, launchToken: process.env.OMX_CODEX_LAUNCH_TOKEN, entryPath: process.env.OMX_ENTRY_PATH, sessionId: process.env.OMX_SESSION_ID, authorizationPath, authorizationExistsAtLaunch, authorization }));",
+        '',
+      ].join('\n'));
+      await writeFile(join(fakeBin, 'codex'), [
+        '#!/bin/sh',
+        'exec "$NODE_BINARY" "$OMX_FAKE_CODEX_CAPTURE_SCRIPT" "$@"',
+        '',
+      ].join('\n'));
+      await chmod(join(fakeBin, 'codex'), 0o755);
+      await writeFile(join(fakeBin, 'ps'), '#!/bin/sh\nexit 0\n');
+      await chmod(join(fakeBin, 'ps'), 0o755);
+
+      const result = runOmx(wd, [], {
+        HOME: home,
+        NODE_OPTIONS: '',
+        NODE_BINARY: process.execPath,
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        OMX_AUTO_UPDATE: '0',
+        OMX_NOTIFY_FALLBACK: '0',
+        OMX_HOOK_DERIVED_SIGNALS: '0',
+        OMX_LAUNCH_POLICY: 'direct',
+        OMX_ROOT: '',
+        OMX_STATE_ROOT: '',
+        TMUX: '',
+        TMUX_PANE: '',
+        OMX_FAKE_CODEX_CAPTURE_PATH: capturePath,
+        OMX_FAKE_CODEX_CAPTURE_SCRIPT: captureScriptPath,
+      });
+
+      assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
+      const captured = JSON.parse(await readFile(capturePath, 'utf8')) as {
+        argv: string[];
+        cwd: string;
+        launchId: string;
+        launchToken: string;
+        entryPath: string;
+        sessionId: string;
+        authorizationPath: string;
+        authorizationExistsAtLaunch: boolean;
+        authorization: Record<string, unknown> | null;
+      };
+      assert.equal(captured.argv.includes('exec'), false, 'root launch must use the interactive runCodex path');
+      assert.match(captured.launchId, /^[0-9a-f-]{36}$/i);
+      assert.match(captured.launchToken, /^[a-f0-9]{64}$/);
+      assert.match(captured.entryPath, /dist\/cli\/omx\.js$/);
+      assert.match(captured.sessionId, /^omx-/);
+      assert.equal(captured.authorizationExistsAtLaunch, true, 'authorization must exist when Codex begins');
+      assert.equal(
+        captured.authorizationPath,
+        join(home, '.omx', 'native-anchor-auth', 'v1', 'launch-authorizations', `${captured.launchId}.json`),
+      );
+
+      const authorization = captured.authorization;
+      assert.ok(authorization, 'fake Codex should observe the pre-launch authorization manifest');
+      assert.equal(authorization.schema_version, 1);
+      assert.equal(authorization.launchId, captured.launchId);
+      assert.equal(authorization.sessionId, captured.sessionId);
+      assert.equal(authorization.originCwd, await realpath(captured.cwd));
+      assert.equal(authorization.tokenSha256, createHash('sha256').update(captured.launchToken).digest('hex'));
+      assert.match(String(authorization.authorizationId), /^[0-9a-f-]{36}$/i);
+      assert.match(String(authorization.signature), /^[a-f0-9]{64}$/);
+      assert.ok(Date.parse(String(authorization.issuedAt)) <= Date.parse(String(authorization.expiresAt)));
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

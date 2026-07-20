@@ -1403,7 +1403,7 @@ describe('ralplan consensus gate state roots', () => {
     }
   });
 
-  it('rejects tracker-backed OMX-adapted Architect and Critic lanes even with valid legacy marker evidence', async () => {
+  it('rejects unsigned OMX-adapted Architect and Critic lanes even with legacy marker evidence', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-ralplan-consensus-adapted-ok-'));
     const sessionId = 'sess-adapted-consensus-ok';
     try {
@@ -1419,7 +1419,7 @@ describe('ralplan consensus gate state roots', () => {
 
       assert.equal(gate.complete, false);
       assert.equal(gate.blockedReason, 'native_subagent_consensus_evidence_missing');
-      assert.match(gate.blockedDetails?.join(' ') ?? '', /unsupported omx_adapted provenance/);
+      assert.match(gate.blockedDetails?.join(' ') ?? '', /adapted policy is invalid: adapted_provenance_policy_required/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1436,7 +1436,7 @@ describe('ralplan consensus gate state roots', () => {
 
       assert.equal(gate.complete, false);
       assert.equal(gate.blockedReason, 'native_subagent_consensus_evidence_missing');
-      assert.match(gate.blockedDetails?.join(' ') ?? '', /unsupported omx_adapted provenance/);
+      assert.match(gate.blockedDetails?.join(' ') ?? '', /adapted policy is invalid: adapted_provenance_policy_required/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1461,7 +1461,7 @@ describe('ralplan consensus gate state roots', () => {
 
       assert.equal(gate.complete, false);
       assert.equal(gate.blockedReason, 'native_subagent_consensus_evidence_missing');
-      assert.match(gate.blockedDetails?.join(' ') ?? '', /unsupported omx_adapted provenance/);
+      assert.match(gate.blockedDetails?.join(' ') ?? '', /adapted policy is invalid: adapted_provenance_policy_required/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1479,7 +1479,7 @@ describe('ralplan consensus gate state roots', () => {
 
       assert.equal(gate.complete, false);
       assert.equal(gate.blockedReason, 'native_subagent_consensus_evidence_missing');
-      assert.match(gate.blockedDetails?.join(' ') ?? '', /unsupported omx_adapted provenance/);
+      assert.match(gate.blockedDetails?.join(' ') ?? '', /adapted policy is invalid: adapted_provenance_policy_required/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1499,7 +1499,7 @@ describe('ralplan consensus gate state roots', () => {
 
       assert.equal(gate.complete, false);
       assert.equal(gate.blockedReason, 'native_subagent_consensus_evidence_missing');
-      assert.match(gate.blockedDetails?.join(' ') ?? '', /unsupported omx_adapted provenance/);
+      assert.match(gate.blockedDetails?.join(' ') ?? '', /adapted policy is invalid: adapted_provenance_policy_required/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1517,7 +1517,7 @@ describe('ralplan consensus gate state roots', () => {
 
       assert.equal(gate.complete, false);
       assert.equal(gate.blockedReason, 'native_subagent_consensus_evidence_missing');
-      assert.match(gate.blockedDetails?.join(' ') ?? '', /unsupported omx_adapted provenance/);
+      assert.match(gate.blockedDetails?.join(' ') ?? '', /adapted policy is invalid: adapted_provenance_policy_required/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

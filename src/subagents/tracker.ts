@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { AGENT_DEFINITIONS } from '../agents/definitions.js';
 import { getBaseStateDir, getBaseStateDirWithSource } from '../state/paths.js';
 import { canonicalizeOriginCwd } from '../leader/contract.js';
-import { verifyNativeLeaderAttestation } from './native-anchor-auth.js';
+import { verifyAdaptedProvenanceReceipt, verifyNativeLeaderAttestation } from './native-anchor-auth.js';
 
 import { codexAgentsDir, projectCodexAgentsDir } from '../utils/paths.js';
 
@@ -39,6 +39,27 @@ export interface TrackedSubagentThread {
   resume_completed_at?: string;
   resume_failed_at?: string;
   resume_failure_reason?: string;
+  adapted_receipt?: AdaptedProvenanceReceipt;
+}
+
+export interface AdaptedProvenanceBinding {
+  scope: string;
+  policy_id: string;
+  origin_cwd: string;
+  plan_path: string;
+  plan_sha256: string;
+  launch_id: string;
+  issued_at: string;
+  expires_at: string;
+}
+
+export interface AdaptedProvenanceReceipt extends AdaptedProvenanceBinding {
+  session_id: string;
+  parent_thread_id: string;
+  child_thread_id: string;
+  role: string;
+  correlation_token: string;
+  signature: string;
 }
 
 export interface TrackedSubagentSession {
@@ -79,6 +100,7 @@ export interface RecordSubagentTurnInput {
   resumeFailedAt?: string;
   resumeFailureReason?: string;
   preserveCompletionEvidence?: boolean;
+  adaptedReceipt?: AdaptedProvenanceReceipt;
 }
 
 export interface PendingRoleIntent {
@@ -93,6 +115,7 @@ export interface PendingRoleIntent {
   bound_at?: string;
 
   origin_cwd?: string;
+  adapted_policy?: AdaptedProvenanceBinding;
 }
 
 export interface SubagentSessionSummary {
@@ -257,6 +280,7 @@ function normalizePendingRoleIntent(value: unknown): PendingRoleIntent | null {
   const boundAt = readOptionalTrimmedString(candidate.bound_at);
   const hasValidBoundAt = Boolean(boundAt && Number.isFinite(Date.parse(boundAt)));
   const originCwd = readOptionalTrimmedString(candidate.origin_cwd);
+  const adaptedPolicy = normalizeAdaptedProvenanceBinding(candidate.adapted_policy);
   return {
     role,
     session_id: sessionId,
@@ -272,7 +296,46 @@ function normalizePendingRoleIntent(value: unknown): PendingRoleIntent | null {
       : {}),
     ...(bindingState && hasValidBoundAt ? { bound_at: boundAt } : {}),
     ...(originCwd ? { origin_cwd: originCwd } : {}),
+    ...(adaptedPolicy ? { adapted_policy: adaptedPolicy } : {}),
   };
+}
+
+function normalizeAdaptedProvenanceBinding(value: unknown): AdaptedProvenanceBinding | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const required = ['scope', 'policy_id', 'origin_cwd', 'plan_path', 'plan_sha256', 'launch_id', 'issued_at', 'expires_at'];
+  if (required.some((key) => typeof candidate[key] !== 'string' || !(candidate[key] as string).trim())) return null;
+  const binding: AdaptedProvenanceBinding = {
+    scope: String(candidate.scope).trim(),
+    policy_id: String(candidate.policy_id).trim(),
+    origin_cwd: String(candidate.origin_cwd).trim(),
+    plan_path: String(candidate.plan_path).trim(),
+    plan_sha256: String(candidate.plan_sha256).trim(),
+    launch_id: String(candidate.launch_id).trim(),
+    issued_at: String(candidate.issued_at).trim(),
+    expires_at: String(candidate.expires_at).trim(),
+  };
+  if (!/^[A-Za-z0-9._:-]{1,160}$/.test(binding.scope) || !/^[a-f0-9]{64}$/.test(binding.plan_sha256)
+    || !Number.isFinite(Date.parse(binding.issued_at)) || !Number.isFinite(Date.parse(binding.expires_at))) return null;
+  return binding;
+}
+
+function normalizeAdaptedProvenanceReceipt(value: unknown): AdaptedProvenanceReceipt | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const binding = normalizeAdaptedProvenanceBinding(candidate);
+  const required = ['session_id', 'parent_thread_id', 'child_thread_id', 'role', 'correlation_token', 'signature'];
+  if (!binding || required.some((key) => typeof candidate[key] !== 'string' || !(candidate[key] as string).trim())) return null;
+  const receipt: AdaptedProvenanceReceipt = {
+    ...binding,
+    session_id: String(candidate.session_id).trim(),
+    parent_thread_id: String(candidate.parent_thread_id).trim(),
+    child_thread_id: String(candidate.child_thread_id).trim(),
+    role: String(candidate.role).trim(),
+    correlation_token: String(candidate.correlation_token).trim(),
+    signature: String(candidate.signature).trim(),
+  };
+  return /^[A-Fa-f0-9]{64}$/.test(receipt.signature) ? receipt : null;
 }
 
 export function normalizeSubagentTrackingState(input: unknown): SubagentTrackingState {
@@ -339,6 +402,9 @@ export function normalizeSubagentTrackingState(input: unknown): SubagentTracking
           : {}),
         ...(typeof candidate.resume_failure_reason === 'string' && candidate.resume_failure_reason.trim().length > 0
           ? { resume_failure_reason: candidate.resume_failure_reason.trim() }
+          : {}),
+        ...(normalizeAdaptedProvenanceReceipt(candidate.adapted_receipt)
+          ? { adapted_receipt: normalizeAdaptedProvenanceReceipt(candidate.adapted_receipt)! }
           : {}),
       };
     }
@@ -1001,7 +1067,9 @@ export type LeaderBootstrapFailureReason =
   | 'invalid_origin'
   | 'single_flight_conflict'
   | 'native_anchor_unavailable'
-  | 'native_anchor_mismatch';
+  | 'native_anchor_mismatch'
+  | 'invalid_adapted_provenance_policy'
+  | 'invalid_adapted_provenance_transition';
 
 export function attestLeaderThread(
   cwd: string,
@@ -1049,7 +1117,7 @@ export function hasVerifiedLeaderAttestation(sessionId: string, session: Tracked
 
 export function ensureLeaderAndRecordIntent(
   cwd: string,
-  input: { role: string; sessionId: string; parentThreadId: string; correlationToken: string; ttlMs?: number; nowMs?: number },
+  input: { role: string; sessionId: string; parentThreadId: string; correlationToken: string; ttlMs?: number; nowMs?: number; adaptedPolicy?: AdaptedProvenanceBinding },
 ): { ok: true; intent: PendingRoleIntent; reused: boolean } | { ok: false; reason: LeaderBootstrapFailureReason } {
   const role = resolveInstalledRoleName(input.role, undefined, cwd);
   if (!role) return { ok: false, reason: 'unknown_role' };
@@ -1068,6 +1136,7 @@ export function ensureLeaderAndRecordIntent(
     const session = state.sessions[sessionId];
     if (!hasVerifiedLeaderAttestation(sessionId, session)) return { ok: false, reason: 'native_anchor_unavailable' as const };
     if (session.leader_thread_id !== parentThreadId || threadIsTrackedAsSubagent(state, parentThreadId)) return { ok: false, reason: 'native_anchor_mismatch' as const };
+    const policy = input.adaptedPolicy;
     const existing = state.pending_role_intents.filter((intent) => isOwn(intent) && intent.session_id === sessionId && intent.parent_thread_id === parentThreadId && intent.binding_state !== 'bound' && !isExpiredPendingRoleIntent(intent, nowMs));
     if (existing.length > 0) {
       if (existing.some((intent) => !isCanonicalCorrelationToken(intent.correlation_token))) return { ok: false, reason: 'invalid_correlation_token' };
@@ -1075,8 +1144,16 @@ export function ensureLeaderAndRecordIntent(
       if (existing.some((intent) => intent.role !== role || intent.correlation_token !== reusable.correlation_token)) {
         return { ok: false, reason: 'single_flight_conflict' };
       }
+      if (!policy || policy.origin_cwd !== canonicalOrigin || Date.parse(policy.expires_at) <= nowMs || !Number.isFinite(Date.parse(policy.issued_at))
+        || existing.some((intent) => !sameAdaptedProvenanceBinding(intent.adapted_policy, policy))) {
+        return { ok: false, reason: 'invalid_adapted_provenance_policy' as const };
+      }
       return { ok: true, intent: reusable, reused: true };
     }
+    if (!policy || policy.origin_cwd !== canonicalOrigin || Date.parse(policy.expires_at) <= nowMs || !Number.isFinite(Date.parse(policy.issued_at))) {
+      return { ok: false, reason: 'invalid_adapted_provenance_policy' as const };
+    }
+    if (adaptedRoleTransitionProblem(session, sessionId, role, policy) !== null) return { ok: false, reason: 'invalid_adapted_provenance_transition' as const };
     const nowIso = new Date(nowMs).toISOString();
     const next = recordSubagentTurn(state, { sessionId, threadId: parentThreadId, kind: 'leader', timestamp: nowIso });
     const intent: PendingRoleIntent = {
@@ -1087,6 +1164,7 @@ export function ensureLeaderAndRecordIntent(
       created_at: nowIso,
       expires_at: new Date(nowMs + (typeof input.ttlMs === 'number' && Number.isFinite(input.ttlMs) ? input.ttlMs : 10 * 60_000)).toISOString(),
       origin_cwd: canonicalOrigin,
+      adapted_policy: policy,
     };
     next.pending_role_intents = [
       ...next.pending_role_intents
@@ -1100,12 +1178,81 @@ export function ensureLeaderAndRecordIntent(
   });
 }
 
+function sameAdaptedProvenanceBinding(
+  left: AdaptedProvenanceBinding | undefined,
+  right: AdaptedProvenanceBinding,
+): boolean {
+  return Boolean(left && left.scope === right.scope && left.policy_id === right.policy_id
+    && left.origin_cwd === right.origin_cwd && left.plan_path === right.plan_path
+    && left.plan_sha256 === right.plan_sha256 && left.launch_id === right.launch_id
+    && left.issued_at === right.issued_at && left.expires_at === right.expires_at);
+}
+
+function adaptedRoleTransitionProblem(
+  session: TrackedSubagentSession,
+  sessionId: string,
+  role: string,
+  policy: AdaptedProvenanceBinding,
+): string | null {
+  if (!['planner', 'architect', 'critic'].includes(role)) return 'adapted provenance only permits planner, architect, and critic roles';
+  const lanes = Object.values(session.threads)
+    .filter((thread) => thread.kind === 'subagent' && thread.provenance_kind === OMX_ADAPTED_PROVENANCE && Boolean(thread.role));
+  const completed = (expectedRole: string) => lanes
+    .filter((thread) => hasAuthenticatedAdaptedReceipt(session, sessionId, thread, expectedRole, policy)
+      && typeof thread.completed_at === 'string' && Number.isFinite(Date.parse(thread.completed_at)))
+    .sort((left, right) => Date.parse(right.completed_at!) - Date.parse(left.completed_at!));
+  if (role === 'planner') return lanes.length === 0 ? null : 'adapted planner may only be the first adapted lane in a session';
+  const planner = completed('planner')[0];
+  if (!planner) return 'adapted architect/critic requires a completed adapted planner lane';
+  if (role === 'architect') return null;
+  const architect = completed('architect')[0];
+  if (!architect) return 'adapted critic requires a completed adapted architect lane';
+  const critic = completed('critic')[0];
+  if (critic && Date.parse(critic.completed_at!) >= Date.parse(architect.completed_at!)) {
+    return 'adapted critic requires a newer completed adapted architect lane';
+  }
+  return null;
+}
+
+function hasAuthenticatedAdaptedReceipt(
+  session: TrackedSubagentSession,
+  sessionId: string,
+  thread: TrackedSubagentThread,
+  expectedRole: string,
+  policy: AdaptedProvenanceBinding,
+): boolean {
+  const receipt = thread.adapted_receipt;
+  const leaderThreadId = session.leader_thread_id?.trim();
+  if (!receipt || !leaderThreadId || receipt.scope !== policy.scope || receipt.policy_id !== policy.policy_id
+    || receipt.session_id !== sessionId || receipt.origin_cwd !== policy.origin_cwd
+    || receipt.plan_path !== policy.plan_path || receipt.plan_sha256 !== policy.plan_sha256
+    || receipt.launch_id !== policy.launch_id || receipt.issued_at !== policy.issued_at
+    || receipt.expires_at !== policy.expires_at || receipt.parent_thread_id !== leaderThreadId
+    || receipt.parent_thread_id === receipt.child_thread_id || receipt.child_thread_id !== thread.thread_id
+    || receipt.role !== expectedRole || thread.role !== expectedRole) return false;
+  return verifyAdaptedProvenanceReceipt({
+    scope: receipt.scope,
+    policyId: receipt.policy_id,
+    sessionId: receipt.session_id,
+    originCwd: receipt.origin_cwd,
+    planPath: receipt.plan_path,
+    planSha256: receipt.plan_sha256,
+    launchId: receipt.launch_id,
+    issuedAt: receipt.issued_at,
+    expiresAt: receipt.expires_at,
+    parentThreadId: receipt.parent_thread_id,
+    childThreadId: receipt.child_thread_id,
+    role: receipt.role,
+    correlationToken: receipt.correlation_token,
+  }, receipt.signature);
+}
+
 
 export function bindPendingRoleIntentUnderLock(
   cwd: string,
   input: { sessionId: string; parentThreadId: string; correlationToken?: string; nowMs?: number; requireAttestedLeader?: boolean },
-  bind: (state: SubagentTrackingState, intent: { role: string; provenanceKind: typeof OMX_ADAPTED_PROVENANCE }) => SubagentTrackingState,
-): { role: string; provenanceKind: typeof OMX_ADAPTED_PROVENANCE; claimantToken: string | undefined; alreadyBound: boolean } | null {
+  bind: (state: SubagentTrackingState, intent: { role: string; provenanceKind: typeof OMX_ADAPTED_PROVENANCE; correlationToken?: string; adaptedPolicy?: AdaptedProvenanceBinding }) => SubagentTrackingState,
+): { role: string; provenanceKind: typeof OMX_ADAPTED_PROVENANCE; correlationToken?: string; adaptedPolicy?: AdaptedProvenanceBinding; claimantToken: string | undefined; alreadyBound: boolean } | null {
   const nowMs = normalizeNowMs(input.nowMs);
   const sessionId = input.sessionId.trim();
   const parentThreadId = input.parentThreadId.trim();
@@ -1146,9 +1293,13 @@ export function bindPendingRoleIntentUnderLock(
       return null;
     }
 
+    const adaptedPolicy = matchedIntent.adapted_policy;
+    if (input.requireAttestedLeader && (!adaptedPolicy || Date.parse(adaptedPolicy.expires_at) <= nowMs)) return null;
     const adaptedIntent = {
       role: matchedIntent.role,
       provenanceKind: OMX_ADAPTED_PROVENANCE,
+      ...(adaptedPolicy ? { correlationToken: matchedIntent.correlation_token } : {}),
+      ...(adaptedPolicy ? { adaptedPolicy } : {}),
     } as const;
     if (input.requireAttestedLeader && matchedIntent.binding_state === 'bound') return null;
     if (matchedIntent.binding_state === 'bound') {
@@ -1434,6 +1585,11 @@ export function recordSubagentTurn(state: SubagentTrackingState, input: RecordSu
       ? { resume_failure_reason: input.resumeFailureReason.trim() }
       : existingThread?.resume_failure_reason
         ? { resume_failure_reason: existingThread.resume_failure_reason }
+        : {}),
+    ...(normalizeAdaptedProvenanceReceipt(input.adaptedReceipt)
+      ? { adapted_receipt: normalizeAdaptedProvenanceReceipt(input.adaptedReceipt)! }
+      : existingThread?.adapted_receipt
+        ? { adapted_receipt: existingThread.adapted_receipt }
         : {}),
   };
 

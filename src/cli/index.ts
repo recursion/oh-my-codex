@@ -8,7 +8,7 @@ import { basename, dirname, join, posix, resolve, win32 } from "path";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
 import { copyFile, cp, lstat, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from "fs/promises";
 import { constants as osConstants, homedir } from "os";
-import { createHash, randomUUID } from "crypto";
+import { createHash, randomBytes, randomUUID } from "crypto";
 import {
   setup,
   SETUP_MCP_MODES,
@@ -156,6 +156,7 @@ import {
 } from "../team/tmux-session.js";
 import { getPackageRoot } from "../utils/package.js";
 import { codexConfigPath, omxRoot, rememberOmxLaunchContext, resolveOmxCliEntryPath } from "../utils/paths.js";
+import { issueNativeLaunchAuthorization, OMX_CODEX_LAUNCH_TOKEN_ENV } from "../subagents/native-anchor-auth.js";
 import { cleanCodexModelAvailabilityNuxIfNeeded, extractSharedMcpRegistryServersFromConfig, repairConfigIfNeeded, repairProjectScopeTrustStateForLaunch, syncProjectScopeTrustStateFromRuntime } from "../config/generator.js";
 import type { UnifiedMcpRegistryServer } from "../config/mcp-registry.js";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../config/omx-first-party-mcp.js";
@@ -1996,6 +1997,36 @@ function runCodexBlocking(
   }
 }
 
+/**
+ * Bind a Codex process to an OMX-created, short-lived launch capability before
+ * it starts. The hook wrapper can only verify this artifact; it cannot create
+ * one from an arbitrary OMX_ENTRY_PATH or launch id supplied to direct Codex.
+ */
+export function authorizeCodexLaunchEnv(
+  cwd: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const launchId = randomUUID();
+  const token = randomBytes(32).toString('hex');
+  const authorizedEnv: NodeJS.ProcessEnv = {
+    ...env,
+    OMX_CODEX_LAUNCH_ID: launchId,
+    [OMX_CODEX_LAUNCH_TOKEN_ENV]: token,
+  };
+  const authorization = issueNativeLaunchAuthorization({
+    cwd,
+    sessionId,
+    launchId,
+    token,
+    env: authorizedEnv,
+  });
+  if (!authorization) {
+    throw new Error('Unable to create the authenticated OMX Codex launch authorization.');
+  }
+  return authorizedEnv;
+}
+
 export function omxRuntimeCommandShimFileName(
   platform: NodeJS.Platform = process.platform,
 ): string {
@@ -3602,12 +3633,11 @@ export async function execWithOverlay(args: string[]): Promise<void> {
       },
       omxBin,
     );
-    const codexEnv = {
+    const codexEnv = authorizeCodexLaunchEnv(cwd, sessionId, {
       ...codexEnvBase,
-      OMX_CODEX_LAUNCH_ID: randomUUID(),
       ...buildHudRuntimeEnv({ sessionId, ...hudRuntimeRoot }).env,
       ...(notifyTempContractRaw ? { [OMX_NOTIFY_TEMP_CONTRACT_ENV]: notifyTempContractRaw } : {}),
-    };
+    });
     runCodexBlocking(cwd, codexArgs, codexEnv);
   } finally {
     await postLaunch(cwd, sessionId, codexHomeOverride, true, projectLocalCodexHomeForCleanup);
@@ -4474,12 +4504,43 @@ export function serializeDetachedSessionParentEnv(
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Serialize the detached leader environment for a native Windows PowerShell
+ * pane. Keep the launch capability out of tmux arguments and visible pane
+ * input: the scheduled command dot-sources this private file, removes it, and
+ * only then starts Codex.
+ */
+export function serializeDetachedWindowsSessionParentEnv(
+  env: NodeJS.ProcessEnv,
+): string {
+  const lines: string[] = [];
+  for (const key of Object.keys(env).sort()) {
+    if (!SHELL_ENV_NAME_PATTERN.test(key)) continue;
+    if (DETACHED_SESSION_PANE_ENV_KEYS.has(key)) continue;
+    const value = env[key];
+    if (typeof value !== "string") continue;
+    if (value.includes("\0")) continue;
+    lines.push(
+      `Set-Item -LiteralPath ${quotePowerShellArg(`Env:${key}`)} -Value ${quotePowerShellArg(value)}`,
+    );
+  }
+  return `${lines.join("\r\n")}\r\n`;
+}
+
 export function detachedSessionParentEnvFilePath(
   cwd: string,
   sessionId: string,
 ): string {
   const safeSessionId = sessionId.replace(/[^A-Za-z0-9_.-]/g, "_");
   return join(omxRoot(cwd), "runtime", "tmux-env", `${safeSessionId}.env`);
+}
+
+export function detachedWindowsSessionParentEnvFilePath(
+  cwd: string,
+  sessionId: string,
+): string {
+  const safeSessionId = sessionId.replace(/[^A-Za-z0-9_.-]/g, "_");
+  return join(omxRoot(cwd), "runtime", "tmux-env", `${safeSessionId}.ps1`);
 }
 
 export function writeDetachedSessionParentEnvFile(
@@ -4490,6 +4551,21 @@ export function writeDetachedSessionParentEnvFile(
   const filePath = detachedSessionParentEnvFilePath(cwd, sessionId);
   mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
   writeFileSync(filePath, serializeDetachedSessionParentEnv(env), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  return filePath;
+}
+
+export function writeDetachedWindowsSessionParentEnvFile(
+  cwd: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv,
+): string {
+  const filePath = detachedWindowsSessionParentEnvFilePath(cwd, sessionId);
+  mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
+  // Windows PowerShell 5.1 recognizes UTF-8 source reliably only with a BOM.
+  writeFileSync(filePath, `\uFEFF${serializeDetachedWindowsSessionParentEnv(env)}`, {
     encoding: "utf-8",
     mode: 0o600,
   });
@@ -5419,11 +5495,10 @@ function runCodex(
     },
     omxBin,
   );
-  const codexEnvWithSession = {
+  const codexEnvWithSession = authorizeCodexLaunchEnv(cwd, sessionId, {
     ...codexBaseEnv,
-    OMX_CODEX_LAUNCH_ID: randomUUID(),
     ...buildHudRuntimeEnv({ sessionId }).env,
-  };
+  });
   const codexEnv = workerLaunchArgs
     ? {
         ...codexEnvWithSession,
@@ -5570,9 +5645,6 @@ function runCodex(
   } else {
     // Not in tmux: create a new tmux session with codex + HUD pane
     const codexCmd = buildTmuxPaneCommand("codex", launchArgs);
-    const detachedWindowsCodexCmd = nativeWindows
-      ? buildWindowsPromptCommand("codex", launchArgs)
-      : null;
     const sessionName = buildDetachedTmuxSessionName(cwd, sessionId);
     const launchDetachedSession = (): { postLaunchHandledExternally: boolean } => {
       const contextKey = runtimeContext?.madmaxDetachedContext ?? process.env[OMX_MADMAX_DETACHED_CONTEXT_ENV]?.trim();
@@ -5645,15 +5717,28 @@ function runCodex(
       let registeredHookName: string | null = null;
       let registeredClientAttachedHookName: string | null = null;
       let detachedParentEnvFilePath: string | undefined;
+      let detachedWindowsCodexCmd: string | null = null;
       let detachedLeaderPaneId: string | null = null;
       try {
         // This path is the user-shell interactive launch: OMX creates a tmux
         // session and immediately attaches the user's terminal to it. If a tmux
         // server already exists, `new-session -e` only forwards explicit values,
         // so provider-specific parent-shell keys would disappear. Source a
-        // private env file inside the leader shell instead of putting every
-        // parent env value on the tmux command line or in logs.
-        if (!nativeWindows) {
+        // private env file from the leader shell instead of putting every
+        // parent env value on the tmux command line or in logs. Native Windows
+        // sources the analogous PowerShell file from the scheduled command.
+        if (nativeWindows) {
+          detachedParentEnvFilePath = writeDetachedWindowsSessionParentEnvFile(
+            cwd,
+            sessionId,
+            codexEnvWithNotify,
+          );
+          detachedWindowsCodexCmd = buildWindowsPromptCommand(
+            "codex",
+            launchArgs,
+            detachedParentEnvFilePath,
+          );
+        } else {
           detachedParentEnvFilePath = writeDetachedSessionParentEnvFile(
             cwd,
             sessionId,
@@ -5746,6 +5831,7 @@ function runCodex(
               scheduleDetachedWindowsCodexLaunch(
                 sessionName,
                 detachedWindowsCodexCmd,
+                detachedParentEnvFilePath,
               );
             }
             for (const finalizeStep of finalizeSteps) {
@@ -5911,6 +5997,7 @@ export function isCodexVersionRequest(args: string[]): boolean {
 export function buildWindowsPromptCommand(
   command: string,
   args: string[],
+  parentEnvFilePath?: string,
 ): string {
   const invocation = [
     "&",
@@ -5919,6 +6006,12 @@ export function buildWindowsPromptCommand(
   ].join(" ");
   const wrappedCommand = [
     "$ErrorActionPreference = 'Stop'",
+    ...(parentEnvFilePath?.trim()
+      ? [
+          `. ${quotePowerShellArg(parentEnvFilePath)}`,
+          `Remove-Item -LiteralPath ${quotePowerShellArg(parentEnvFilePath)} -Force`,
+        ]
+      : []),
     `& { ${invocation} }`,
   ].join("; ");
   return `powershell.exe -NoLogo -NoExit -EncodedCommand ${encodePowerShellCommand(wrappedCommand)}`;
@@ -5976,6 +6069,7 @@ export function buildDetachedWindowsBootstrapScript(
   commandText: string,
   delayMs: number = WINDOWS_DETACHED_BOOTSTRAP_DELAY_MS,
   tmuxCommand: string = resolveTmuxExecutableForLaunch(),
+  cleanupPath?: string,
 ): string {
   const delay =
     Number.isFinite(delayMs) && delayMs > 0
@@ -5984,13 +6078,19 @@ export function buildDetachedWindowsBootstrapScript(
   const targetLiteral = JSON.stringify(`${sessionName}:0.0`);
   const commandLiteral = JSON.stringify(commandText);
   const tmuxCommandLiteral = JSON.stringify(tmuxCommand);
+  const cleanupPathLiteral = JSON.stringify(cleanupPath?.trim() ?? "");
 
   return [
     "const { execFileSync } = require('child_process');",
+    "const { rmSync } = require('fs');",
     `const tmuxCommand = ${tmuxCommandLiteral};`,
+    `const cleanupPath = ${cleanupPathLiteral};`,
+    "function cleanup() { if (!cleanupPath) return; try { rmSync(cleanupPath, { force: true }); } catch {} }",
     `setTimeout(() => {`,
-    `try { execFileSync(tmuxCommand, ['send-keys', '-t', ${targetLiteral}, '-l', '--', ${commandLiteral}], { stdio: 'ignore' }); } catch {}`,
-    `try { execFileSync(tmuxCommand, ['send-keys', '-t', ${targetLiteral}, 'C-m'], { stdio: 'ignore' }); } catch {}`,
+    `try {`,
+    `execFileSync(tmuxCommand, ['send-keys', '-t', ${targetLiteral}, '-l', '--', ${commandLiteral}], { stdio: 'ignore' });`,
+    `execFileSync(tmuxCommand, ['send-keys', '-t', ${targetLiteral}, 'C-m'], { stdio: 'ignore' });`,
+    `} catch { cleanup(); }`,
     `}, ${delay});`,
   ].join("");
 }
@@ -5998,16 +6098,26 @@ export function buildDetachedWindowsBootstrapScript(
 function scheduleDetachedWindowsCodexLaunch(
   sessionName: string,
   commandText: string,
+  cleanupPath?: string,
 ): void {
   const child = spawn(
     process.execPath,
-    ["-e", buildDetachedWindowsBootstrapScript(sessionName, commandText)],
+    ["-e", buildDetachedWindowsBootstrapScript(sessionName, commandText, WINDOWS_DETACHED_BOOTSTRAP_DELAY_MS, resolveTmuxExecutableForLaunch(), cleanupPath)],
     {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
     },
   );
+  child.once("error", () => {
+    if (!cleanupPath) return;
+    try {
+      rmSync(cleanupPath, { force: true });
+    } catch {
+      // The scheduled bootstrap also attempts cleanup; do not turn a cleanup
+      // failure into an unhandled child-process error.
+    }
+  });
   child.unref();
 }
 

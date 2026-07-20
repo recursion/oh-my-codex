@@ -17,7 +17,7 @@ async function invoke(args: string[], deps: RalplanCommandDependencies = {}) {
 }
 
  describe('#3212 ralplan authenticated anchor surface', () => {
-  it('fails the explicit adapted-surface preflight and neutralizes routing-only Ralplan state', async () => {
+  it('fails the default preflight and neutralizes routing-only Ralplan state', async () => {
     let resolved = false;
     let cancelled = false;
     const result = await invoke(['preflight', '--json'], {
@@ -42,6 +42,57 @@ async function invoke(args: string[], deps: RalplanCommandDependencies = {}) {
     assert.equal(result.exitCode, undefined);
     assert.deepEqual(JSON.parse(result.stdout.join('\n')), { ok: true, session_id: 'session', leader_thread_id: 'leader' });
     assert.equal(cancelled, false);
+  });
+  it('requires a valid policy only for the explicit adapted preflight', async () => {
+    let cancelled = false;
+    const result = await invoke(['preflight', '--adapted-provenance', '--json'], {
+      cwd: () => '/tmp/omx-preflight-adapted-policy-required',
+      cancelRalplan: async () => { cancelled = true; },
+      resolveSessionScope: async () => ({ cwd: '/tmp/omx-preflight-adapted-policy-required', stateDir: '/tmp/omx-preflight-adapted-policy-required/.omx/state', sessionId: 'session', metadata: { sessionId: 'session' } }) as never,
+      readTrackingState: async () => ({ ok: true, state: { schemaVersion: 1, sessions: { session: { session_id: 'session', leader_thread_id: 'leader', leader_attested_at: new Date().toISOString(), updated_at: new Date().toISOString(), threads: {} } }, pending_role_intents: [] } }),
+      verifyLeaderAttestation: () => true,
+      readAdaptedProvenancePolicy: () => ({ ok: false, reason: 'adapted_provenance_policy_required' }),
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(cancelled, true);
+    assert.deepEqual(JSON.parse(result.stdout.join('\n')), { ok: false, reason: 'adapted_provenance_policy_required' });
+  });
+  it('accepts either order of the adapted preflight flags with a valid policy', async () => {
+    for (const args of [
+      ['preflight', '--adapted-provenance', '--json'],
+      ['preflight', '--json', '--adapted-provenance'],
+    ]) {
+      let cancelled = false;
+      const result = await invoke(args, {
+        cwd: () => '/tmp/omx-preflight-adapted-policy-valid',
+        cancelRalplan: async () => { cancelled = true; },
+        resolveSessionScope: async () => ({ cwd: '/tmp/omx-preflight-adapted-policy-valid', stateDir: '/tmp/omx-preflight-adapted-policy-valid/.omx/state', sessionId: 'session', metadata: { sessionId: 'session' } }) as never,
+        readTrackingState: async () => ({ ok: true, state: { schemaVersion: 1, sessions: { session: { session_id: 'session', leader_thread_id: 'leader', leader_attested_at: new Date().toISOString(), updated_at: new Date().toISOString(), threads: {} } }, pending_role_intents: [] } }),
+        verifyLeaderAttestation: () => true,
+        readAdaptedProvenancePolicy: () => ({ ok: true, policy: {} } as never),
+      });
+      assert.equal(result.exitCode, undefined, args.join(' '));
+      assert.deepEqual(JSON.parse(result.stdout.join('\n')), { ok: true, session_id: 'session', leader_thread_id: 'leader' });
+      assert.equal(cancelled, false);
+    }
+  });
+  it('rejects duplicate and unknown preflight flags before resolving state', async () => {
+    await assert.rejects(() => invoke(['preflight', '--json', '--json']), /Duplicate ralplan preflight argument: --json/);
+    await assert.rejects(() => invoke(['preflight', '--adapted-provenance', '--bogus']), /Unknown ralplan preflight argument: --bogus/);
+  });
+  it('rejects noncanonical adapted-policy grants before resolving session state', async () => {
+    const canonical = ['adapted-provenance', 'grant', '--plan', 'docs/plans/parked/candidate.md', '--acknowledge', 'I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE', '--json'];
+    await assert.rejects(
+      () => invoke(['adapted-provenance', 'grant', '--plan=docs/plans/parked/candidate.md', '--acknowledge=I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE', '--json']),
+      /must use the canonical/,
+    );
+    await assert.rejects(
+      () => invoke(['adapted-provenance', 'grant', '--acknowledge', 'I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE', '--plan', 'docs/plans/parked/candidate.md', '--json']),
+      /must use the canonical/,
+    );
+    const result = await invoke(canonical);
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(JSON.parse(result.stdout.join('\n')), { ok: false, reason: 'native_anchor_unavailable' });
   });
   it('fails preflight when the attested leader is also tracked as a subagent', async () => {
     let cancelled = false;

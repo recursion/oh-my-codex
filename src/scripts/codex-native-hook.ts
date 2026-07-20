@@ -1,4 +1,5 @@
 import { execFileSync } from "child_process";
+import { createHash } from "crypto";
 import { accessSync, closeSync, constants as fsConstants, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from "fs";
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "path";
@@ -28,9 +29,10 @@ import {
   recordSubagentTurnForSession,
   resolveInstalledRoleName,
 } from "../subagents/tracker.js";
-import { signNativeLeaderAttestation, verifyNativeLaunchClaim } from "../subagents/native-anchor-auth.js";
+import { hasVerifiedPluginLaunchClaim, signAdaptedProvenanceReceipt, signNativeLeaderAttestation } from "../subagents/native-anchor-auth.js";
+import { issueAdaptedProvenanceAuthorization, readValidAdaptedProvenancePolicy } from "../ralplan/adapted-provenance-policy.js";
 import { readRoleRoutingMarker, writeRoleRoutingMarker } from "../subagents/role-routing-marker.js";
-import { evaluateCodex01445PreToolUse } from "../ralplan/documented-leader-preflight.js";
+import { evaluateCodex01445PreToolUse, isCodex01445AdaptedProvenanceGrantCommand, parseCodex01445AdaptedRoleIntentCommand, UNSUPPORTED_DOCUMENTED_LEADER_PRE_TOOL_USE } from "../ralplan/documented-leader-preflight.js";
 import {
   resolveCanonicalTeamStateRoot,
   resolveWorkerNotifyTeamStateRootPath,
@@ -494,8 +496,8 @@ function classifyNativeTranscriptProvenance(transcriptPath: string, nativeSessio
     const originator = safeString(metadata.originator).trim().toLowerCase();
     const threadSource = safeString(metadata.thread_source).trim().toLowerCase();
     if (!source && !originator && !threadSource) return { kind: "unknown" };
-    return (source === "exec" || source === "interactive")
-      && (originator === "codex_exec" || originator === "codex")
+    return source === "interactive"
+      && originator === "codex"
       && threadSource === "user"
       ? { kind: "verified-root" }
       : { kind: "invalid" };
@@ -504,27 +506,60 @@ function classifyNativeTranscriptProvenance(transcriptPath: string, nativeSessio
   }
 }
 
-function isVerifiedPluginLauncherClaim(cwd: string, nativeSessionId: string): boolean {
-  const launchId = safeString(process.env.OMX_CODEX_LAUNCH_ID).trim();
-  if (!launchId || !safeString(process.env.OMX_ENTRY_PATH).trim() || !/^[A-Za-z0-9._-]{1,128}$/.test(launchId)) return false;
-  const stateRoot = safeString(process.env.OMX_ROOT).trim() || join(cwd, ".omx");
-  const claimPath = join(stateRoot, "state", "plugin-hook-launches", `${launchId}.json`);
-  try {
-    const info = lstatSync(claimPath);
-    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 4096) return false;
-    const claim = safeObject(JSON.parse(readFileSync(claimPath, "utf8")));
-    return safeString(claim.sessionId).trim() === nativeSessionId.trim()
-      && verifyNativeLaunchClaim(launchId, nativeSessionId.trim(), safeString(claim.signature).trim());
-  } catch {
-    return false;
-  }
-}
-
-
 function hasOnlyEmptyLeaderRoleCarriers(payload: CodexHookPayload): boolean {
   const source = safeObject(payload.source);
   const carriers = [safeObject(payload), safeObject(source.subagent), safeObject(safeObject(source.subagent).thread_spawn)];
   return carriers.every((carrier) => ["agent_role", "agentRole", "agent_type", "agentType"].every((key) => !Object.prototype.hasOwnProperty.call(carrier, key) || (typeof carrier[key] === "string" && safeString(carrier[key]).trim() === "")));
+}
+
+function isTeamRuntimeContext(payload: CodexHookPayload): boolean {
+  if (process.env.OMX_TEAM_STATE_ROOT?.trim() || process.env.OMX_TEAM_NAME?.trim()
+    || process.env.OMX_TEAM_WORKER_ID?.trim() || process.env.OMX_TEAM_WORKER?.trim()
+    || process.env.OMX_TEAM_INTERNAL_WORKER?.trim()) return true;
+  const source = safeObject(payload.source);
+  return [payload.team_name, payload.teamName, payload.worker_name, payload.workerName, source.team_name, source.teamName]
+    .some((value) => safeString(value).trim().length > 0);
+}
+
+function isAdaptedProvenanceInvocation(words: string[], commandIndex: number): boolean {
+  let invocationWords = words.slice(commandIndex + 1);
+  const separatorIndex = invocationWords.findIndex(isShellCommandSeparator);
+  invocationWords = separatorIndex >= 0 ? invocationWords.slice(0, separatorIndex) : invocationWords;
+  const commandName = commandNameFromShellWord(words[commandIndex] ?? '');
+  if (['node', 'nodejs', 'bun', 'tsx'].includes(commandName)) {
+    const entrypointIndex = invocationWords.findIndex((word) => /(?:^|\/)omx\.js$/.test(shellWordLiteral(word)));
+    if (entrypointIndex < 0) return false;
+    invocationWords = invocationWords.slice(entrypointIndex + 1);
+  }
+  const operands = invocationWords.map(shellWordLiteral);
+  return operands[0] === 'ralplan'
+    && ((operands[1] === 'adapted-provenance' && operands[2] === 'grant')
+      || (operands[1] === 'role-intent' && operands[2] === 'write'));
+}
+
+/**
+ * The adapted-provenance hook authorization is deliberately lexical and
+ * standalone. Detect the same operations through wrappers so a noncanonical
+ * shell spelling cannot fall through to the CLI after the root is attested.
+ */
+function commandAttemptsAdaptedProvenanceOperation(command: string, depth = 0): boolean {
+  const normalized = stripHeredocBodiesForCommandScan(normalizeShellLineContinuations(command));
+  const runtimeEntrypointAttempt = /(?:^|[\s;|&])(?:node|nodejs|bun|tsx)(?:\s+[^\s;|&]+)*?\s+[^\s;|&]*omx\.js\s+ralplan\s+(?:adapted-provenance\s+grant|role-intent\s+write)\b/.test(normalized);
+  const directAttempt = splitShellCommandSegments(normalized).some((segment) => {
+    const words = tokenizeShellWords(segment);
+    return collectShellCliInvocations(words).some(({ commandIndex }) => (
+      commandNameFromShellWord(words[commandIndex] ?? '') === 'omx'
+        && isAdaptedProvenanceInvocation(words, commandIndex)
+    ));
+  });
+  if (runtimeEntrypointAttempt || directAttempt || depth >= CONDUCTOR_BASH_MAX_NESTING_DEPTH) return runtimeEntrypointAttempt || directAttempt;
+  const nestedCommands = [
+    ...extractInvokedShellFunctionBodiesForStateScan(normalized),
+    ...extractNestedShellCommandStringsForStateScan(normalized),
+    ...extractNestedCommandSubstitutionStringsForStateScan(normalized),
+    ...extractNestedProcessSubstitutionStringsForStateScan(normalized),
+  ];
+  return nestedCommands.some((nestedCommand) => commandAttemptsAdaptedProvenanceOperation(nestedCommand, depth + 1));
 }
 
 async function isThreadTrackedAsSubagentFailClosed(cwd: string, threadId: string): Promise<boolean> {
@@ -541,6 +576,7 @@ async function recordNativeSubagentSessionStart(
 ): Promise<void> {
   const parentThreadId = metadata.parentThreadId.trim();
   const childThreadId = childSessionId.trim();
+  if (!parentThreadId || !childThreadId || parentThreadId === childThreadId) return;
   const correlationSessionId = canonicalSessionId.trim() || parentThreadId;
   const trackingSessionIds = [...new Set([
     canonicalSessionId.trim(),
@@ -549,12 +585,37 @@ async function recordNativeSubagentSessionStart(
   let adaptedRole: string | undefined;
 
   if (!metadata.agentRole && correlationSessionId && parentThreadId && metadata.correlationToken) {
+    const policyResult = readValidAdaptedProvenancePolicy(cwd, correlationSessionId);
+    if (!policyResult.ok) return;
     const bound = bindPendingRoleIntentUnderLock(cwd, {
       sessionId: correlationSessionId,
       parentThreadId,
       correlationToken: metadata.correlationToken,
       requireAttestedLeader: true,
     }, (state, intent) => {
+      if (!intent.adaptedPolicy || !intent.correlationToken) return state;
+      const policy = policyResult.policy;
+      if (intent.adaptedPolicy.policy_id !== policy.policyId
+        || intent.adaptedPolicy.scope !== policy.scope
+        || intent.adaptedPolicy.plan_sha256 !== policy.planSha256
+        || intent.adaptedPolicy.launch_id !== policy.launchId) return state;
+      const signedReceipt = {
+        scope: policy.scope,
+        policyId: policy.policyId,
+        sessionId: correlationSessionId,
+        originCwd: policy.originCwd,
+        planPath: policy.planPath,
+        planSha256: policy.planSha256,
+        launchId: policy.launchId,
+        issuedAt: policy.issuedAt,
+        expiresAt: policy.expiresAt,
+        parentThreadId,
+        childThreadId,
+        role: intent.role,
+        correlationToken: intent.correlationToken,
+      };
+      const signature = signAdaptedProvenanceReceipt(signedReceipt);
+      if (!signature) return state;
       let next = state;
       for (const sessionId of trackingSessionIds) {
         if (parentThreadId !== childThreadId) {
@@ -568,6 +629,22 @@ async function recordNativeSubagentSessionStart(
           mode: intent.role,
           role: intent.role,
           provenanceKind: intent.provenanceKind,
+          adaptedReceipt: {
+            scope: signedReceipt.scope,
+            policy_id: signedReceipt.policyId,
+            session_id: signedReceipt.sessionId,
+            origin_cwd: signedReceipt.originCwd,
+            plan_path: signedReceipt.planPath,
+            plan_sha256: signedReceipt.planSha256,
+            launch_id: signedReceipt.launchId,
+            issued_at: signedReceipt.issuedAt,
+            expires_at: signedReceipt.expiresAt,
+            parent_thread_id: signedReceipt.parentThreadId,
+            child_thread_id: signedReceipt.childThreadId,
+            role: signedReceipt.role,
+            correlation_token: signedReceipt.correlationToken,
+            signature,
+          },
         });
       }
       return next;
@@ -3551,7 +3628,7 @@ function buildNativeUnknownRolePreToolUseOutput(
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       additionalContext:
-        "Use an installed OMX role for native agent_type/agent_role dispatch. When the surface reports role_routing_unavailable, do not fabricate agent_type; run `omx ralplan preflight --json` before Ralplan planning, state, HUD, runtime, or delegation work and stop on `unsupported_documented_leader_proof`.",
+        "Use an installed OMX role for native agent_type/agent_role dispatch. When the surface reports role_routing_unavailable, do not fabricate agent_type; run `omx ralplan preflight --json` before Ralplan planning, state, HUD, runtime, or delegation work and stop on `unsupported_documented_leader_proof` by default. The sole exception is a reviewed, explicitly amended plan with a current acknowledged authenticated adapted-provenance policy that passes `omx ralplan preflight --adapted-provenance --json`.",
     },
   };
 }
@@ -19788,13 +19865,18 @@ export async function dispatchCodexNativeHook(
   }
   if (hookEventName === "PreToolUse" && safeString(payload.tool_name).trim() === "Bash") {
     const resolveRole = (role: string) => resolveInstalledRoleName(role, undefined, cwd);
+    const command = safeString(safeObject(payload.tool_input).command);
+    const adaptedProvenanceGrant = isCodex01445AdaptedProvenanceGrantCommand(command);
     const unverifiedRoleIntent = evaluateCodex01445PreToolUse(payload, {
       resolveInstalledRoleName: resolveRole,
       documentedLeaderVerified: false,
     });
-    if (unverifiedRoleIntent) {
-      const unverifiedReason = safeString(safeObject(unverifiedRoleIntent.hookSpecificOutput).permissionDecisionReason);
-      if (!unverifiedReason.startsWith("unsupported_documented_leader_proof:")) {
+    if (commandAttemptsAdaptedProvenanceOperation(command) && !unverifiedRoleIntent && !adaptedProvenanceGrant) {
+      return { hookEventName, omxEventName, skillState: null, outputJson: UNSUPPORTED_DOCUMENTED_LEADER_PRE_TOOL_USE };
+    }
+    if (unverifiedRoleIntent || adaptedProvenanceGrant) {
+      const unverifiedReason = safeString(safeObject(unverifiedRoleIntent?.hookSpecificOutput).permissionDecisionReason);
+      if (unverifiedRoleIntent && !unverifiedReason.startsWith("unsupported_documented_leader_proof:")) {
         return { hookEventName, omxEventName, skillState: null, outputJson: unverifiedRoleIntent };
       }
       const transcript = classifyNativeTranscriptProvenance(safeString(payload.transcript_path ?? payload.transcriptPath), nativeSessionId);
@@ -19810,7 +19892,7 @@ export async function dispatchCodexNativeHook(
         attestationSource,
       );
       const documentedLeaderVerified = Boolean(
-        isVerifiedPluginLauncherClaim(cwd, nativeSessionId)
+        hasVerifiedPluginLaunchClaim(cwd, nativeSessionId)
         && transcript.kind === "verified-root"
         && pointer.status === "usable"
         && canonicalLeaderSessionId
@@ -19819,6 +19901,7 @@ export async function dispatchCodexNativeHook(
         && (!payloadThreadId || payloadThreadId === nativeSessionId)
         && !payloadHasConflictingIdentityAliases(payload)
         && hasOnlyEmptyLeaderRoleCarriers(payload)
+        && !isTeamRuntimeContext(payload)
         && !hasSubagentThreadSpawnProvenance(payload)
         && !(await isThreadTrackedAsSubagentFailClosed(cwd, leaderThreadId))
         && attestationSignature
@@ -19835,6 +19918,24 @@ export async function dispatchCodexNativeHook(
         documentedLeaderVerified,
       });
       if (denial) return { hookEventName, omxEventName, skillState: null, outputJson: denial };
+      if (adaptedProvenanceGrant && !documentedLeaderVerified) {
+        return { hookEventName, omxEventName, skillState: null, outputJson: UNSUPPORTED_DOCUMENTED_LEADER_PRE_TOOL_USE };
+      }
+      const adaptedRoleIntent = parseCodex01445AdaptedRoleIntentCommand(command);
+      if (documentedLeaderVerified && (adaptedProvenanceGrant || adaptedRoleIntent)) {
+        const authorized = issueAdaptedProvenanceAuthorization({
+          cwd,
+          sessionId: canonicalLeaderSessionId,
+          nativeSessionId,
+          operation: adaptedProvenanceGrant ? 'grant' : 'role-intent',
+          ...(adaptedProvenanceGrant
+            ? { commandSha256: createHash('sha256').update(command).digest('hex') }
+            : { role: adaptedRoleIntent!.role, parentThreadId: leaderThreadId }),
+        });
+        if (!authorized) {
+          return { hookEventName, omxEventName, skillState: null, outputJson: UNSUPPORTED_DOCUMENTED_LEADER_PRE_TOOL_USE };
+        }
+      }
     }
   }
   if (hookEventName !== "Stop") {

@@ -11,7 +11,7 @@ import { canonicalizeOriginCwd } from '../../leader/contract.js';
 import { __setCrossProcessPublishBarrierForTest, __setCrossProcessQuarantineBarrierForTest, attestLeaderThread, CrossProcessLockLostError, bindPendingRoleIntentUnderLock, buildSubagentResumeLedger, completeAdaptedRoleBinding, CROSS_PROCESS_LOCK_ARTIFACT_SWEEP_CAP, CROSS_PROCESS_LOCK_LEASE_MS, createSubagentTrackingState, crossProcessLockPath, consumePendingRoleIntent, ensureLeaderAndRecordIntent, recordSubagentTurn, recordSubagentTurnForSession, NATIVE_SUBAGENT_PROVENANCE, OMX_ADAPTED_PROVENANCE, readProcessStartIdentity, readSubagentTrackingState, recordPendingRoleIntent, selectReusableSubagentEntry, summarizeSubagentSession, withCrossProcessFileLockSync } from '../tracker.js';
 import { subagentTrackingPath } from '../tracker.js';
 import { NATIVE_SUBAGENT_ROLE_ROUTING_MARKER_FILE, readRoleRoutingMarker, writeRoleRoutingMarker } from '../role-routing-marker.js';
-import { signNativeLeaderAttestation } from '../native-anchor-auth.js';
+import { __setNativeAnchorAuthRootForTest, signNativeLeaderAttestation } from '../native-anchor-auth.js';
 const credentialDigest = (value: string) => createHash('sha256').update(value).digest('hex');
 const canonicalCorrelationToken = (value: string) => credentialDigest(value).slice(0, 32);
 const canonicalClaimantToken = (value: string) => {
@@ -22,14 +22,34 @@ const canonicalClaimantToken = (value: string) => {
 function signedAttestation(cwd: string, sessionId: string, leaderThreadId: string, source = 'test') {
   const previousCodexHome = process.env.CODEX_HOME;
   const codexHome = join(cwd, '.codex-home');
-  mkdirSync(join(codexHome, '.omx'), { recursive: true });
-  writeFileSync(join(codexHome, '.omx', 'native-anchor-auth.key'), Buffer.alloc(32, 9));
+  const anchorRoot = join(cwd, '.native-anchor');
+  __setNativeAnchorAuthRootForTest(anchorRoot);
+  mkdirSync(anchorRoot, { recursive: true, mode: 0o700 });
+  writeFileSync(join(anchorRoot, 'key'), Buffer.alloc(32, 9), { mode: 0o600 });
   process.env.CODEX_HOME = codexHome;
   const nowMs = Date.now();
   const signature = signNativeLeaderAttestation(sessionId, leaderThreadId, new Date(nowMs).toISOString(), source)!;
   return {
     input: { sessionId, leaderThreadId, source, signature, nowMs },
-    restore: () => previousCodexHome === undefined ? delete process.env.CODEX_HOME : process.env.CODEX_HOME = previousCodexHome,
+    restore: () => {
+      __setNativeAnchorAuthRootForTest();
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    },
+  };
+}
+
+function adaptedPolicy(cwd: string) {
+  const now = Date.now();
+  return {
+    scope: 'test.tracker.adapted.v1',
+    policy_id: 'test-policy',
+    origin_cwd: canonicalizeOriginCwd(cwd)!,
+    plan_path: 'docs/plans/parked/candidate.md',
+    plan_sha256: 'a'.repeat(64),
+    launch_id: 'test-launch',
+    issued_at: new Date(now).toISOString(),
+    expires_at: new Date(now + 60_000).toISOString(),
   };
 }
 
@@ -2394,7 +2414,7 @@ describe('subagents/tracker', () => {
       writeFileSync(trackerPath, `${JSON.stringify(state)}\n`);
       const freshToken = canonicalCorrelationToken('fresh-token');
       const result = ensureLeaderAndRecordIntent(cwd, {
-        role: 'architect', sessionId: 'session', parentThreadId: 'leader', correlationToken: freshToken,
+        role: 'planner', sessionId: 'session', parentThreadId: 'leader', correlationToken: freshToken, adaptedPolicy: adaptedPolicy(cwd),
       });
       assert.equal(result.ok, true);
       if (!result.ok) return;

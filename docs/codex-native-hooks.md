@@ -232,23 +232,50 @@ operator to clear incompatible state explicitly via `omx state ...` or the
 `omx_state.*` MCP tools before retrying. See
 `docs/contracts/multi-state-transition-contract.md`.
 
-## Codex 0.144.5: adapted Ralplan leader-proof boundary (#3194)
+## Authenticated adapted Ralplan fallback (#3194 amendment)
 
-Codex CLI **0.144.5** documented hook payloads do not provide a positive proof that a `PreToolUse` event belongs to the root leader required by adapted Ralplan. `session_id` is shared with parent context and is not root identity. The undocumented `thread_id`, session files, session pointers, transcript state, cwd, and the absence of child markers are never authority evidence. OMX therefore does not infer, repair, or synthesize leader identity from them.
+Typed native role routing remains preferred whenever the task surface exposes
+`agent_type`. The documented Codex 0.144.5 hook payload still does not itself
+make `session_id`, undocumented `thread_id`, pointers, cwd, or the absence of
+child markers into root authority. OMX never infers authority from those values.
 
-Typed native role routing remains the preferred path when the task surface exposes `agent_type`; this boundary does not disable that path. When native role routing reports `role_routing_unavailable`, Ralplan must run `omx ralplan preflight --json` before planner, reviewer, HUD, runtime, or adapted role-intent work. The command neutralizes any routing-only Ralplan selection state so Stop cannot treat it as authority, then fails closed with:
+For a reviewed, explicitly amended plan only, the hook accepts a narrower
+alternative: an interactive `originator:"codex"`, `source:"interactive"`,
+`thread_source:"user"` root with a valid plugin launch claim may authenticate
+the exact standalone grant command and later role-intent command. Before Codex
+starts, OMX creates a private 256-bit launch capability and a `0600`,
+HMAC-signed, expiring pre-launch authorization bound to that session, cwd, and
+launch. The key and launch artifacts live only under the stable OS-user anchor
+`userInfo().homedir/.omx/native-anchor-auth/v1`; `HOME`, `CODEX_HOME`,
+`OMX_ROOT`, and cwd cannot select a replacement root. The plugin only verifies
+that authorization before it writes/verifies a native-session claim; spoofed
+`OMX_ENTRY_PATH` or launch-id environment values cannot mint one. Team workers, payload Team carriers, `codex_exec`/`exec`
+provenance, child spawn provenance, conflicting identity aliases, known
+subagent threads, and equal parent/child ids fail closed when they attempt to
+mint adapted authorization.
 
-```json
-{"ok":false,"reason":"unsupported_documented_leader_proof"}
+The required operator sequence on a `role_routing_unavailable` surface is:
+
+```bash
+omx ralplan adapted-provenance grant --plan docs/plans/...md --acknowledge I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE --json
+omx ralplan preflight --adapted-provenance --json
 ```
 
-A canonical standalone `omx ralplan role-intent write --role <role> --parent-thread "$CODEX_THREAD_ID" --json` Bash command is also denied before pointer, ledger, tracker, or runtime work. For an installed role, the exact `PreToolUse` denial reason is:
+The first command requires the amended plan marker and writes an expiring,
+HMAC-signed policy bound to plan SHA, scope, cwd, session, and launch. The
+second requires both that policy and a hook-authenticated leader. Subsequent
+role intents remain restricted to Planner -> Architect -> Critic and each
+child start produces a signed receipt. This is authenticated adapted
+provenance, not evidence that Codex applied a requested role/model TOML. Codex
+does not provide a caller-bound PreToolUse-to-CLI capability transport, so the
+one-use handoff is not hostile same-user/host isolation: a process that steals
+the active launch capability or key/runtime state can race the exact command.
 
-```text
-unsupported_documented_leader_proof: Codex 0.144.5 hooks do not expose documented root identity required for adapted Ralplan.
-```
-
-The direct CLI result for an installed role is likewise `{"ok":false,"reason":"unsupported_documented_leader_proof"}`. An unknown role remains separately denied as `unknown_role`; it is not a fallback or an authority probe. Wrappers, assignments, compounds, redirects, malformed commands, unrelated tools, and typed native spawn payloads are outside this narrow hook boundary and retain their existing handling.
+Without the explicit amendment and current policy, the normal preflight may
+authenticate a typed-native leader but an adapted preflight or role intent fails
+closed. Unknown roles remain separately denied as `unknown_role`; wrappers,
+assignments, compounds, redirects, malformed commands, unrelated tools, and
+typed native spawn payloads retain their existing handling.
 
 
 ## UserPromptSubmit: session provenance

@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readValidAdaptedProvenancePolicy } from './adapted-provenance-policy.js';
+import { verifyAdaptedProvenanceReceipt } from '../subagents/native-anchor-auth.js';
 import { subagentTrackingPath } from '../subagents/tracker.js';
 import { getBaseStateDir, resolveWorkingDirectoryForState } from '../state/paths.js';
 
@@ -32,6 +34,7 @@ export interface RalplanConsensusGateDiagnostic {
   tracker_path: string;
   architect: RalplanNativeReviewDiagnostic;
   critic: RalplanNativeReviewDiagnostic;
+  planner_problem: string | null;
   distinct_thread_ids: boolean | null;
   pair_problem: string | null;
   remediation: string[];
@@ -80,6 +83,7 @@ type TrackerSnapshot = {
 type TrackerBackedNativeLanesEvaluation = {
   snapshot: TrackerSnapshot | null;
   pairProblem: string | null;
+  plannerProblem: string | null;
   architectProblem: string | null;
   criticProblem: string | null;
   valid: boolean;
@@ -170,6 +174,7 @@ export function buildRalplanConsensusGateFromSources(
       blockedReason: RALPLAN_CONSENSUS_BLOCKED_REASONS.nativeSubagentEvidenceMissing,
       blockedDetails: [
         nativeBlockedEvidence.trackerEvaluation.pairProblem,
+        nativeBlockedEvidence.trackerEvaluation.plannerProblem,
         nativeBlockedEvidence.trackerEvaluation.architectProblem,
         nativeBlockedEvidence.trackerEvaluation.criticProblem,
       ].filter((detail): detail is string => Boolean(detail)),
@@ -683,6 +688,7 @@ function evaluateTrackerBackedNativeRalplanSnapshot(
   snapshot: TrackerSnapshot | null,
 ): TrackerBackedNativeLanesEvaluation {
   const pairProblem = trackerBackedNativeReviewPairProblem(evidence, options, snapshot);
+  const plannerProblem = adaptedPlannerProblem(evidence, options, snapshot);
   const architectProblem = trackerBackedNativeReviewProblem(
     evidence.ralplan_architect_review,
     'architect',
@@ -698,9 +704,10 @@ function evaluateTrackerBackedNativeRalplanSnapshot(
   return {
     snapshot,
     pairProblem,
+    plannerProblem,
     architectProblem,
     criticProblem,
-    valid: !pairProblem && !architectProblem && !criticProblem,
+    valid: !pairProblem && !plannerProblem && !architectProblem && !criticProblem,
   };
 }
 
@@ -743,6 +750,7 @@ function buildTrackerBackedNativeConsensusDiagnostic(
       'both threads have completed_at; any recorded role identity must exactly match its review agent_role (native uses role or mode)',
       'architect and critic thread IDs are distinct',
       'architect completed_at is strictly before critic first_seen_at or started_at in the tracker ledger',
+      'authenticated adapted lanes additionally require a completed, signed Planner receipt bound to the same policy before Architect starts',
     ],
     current_session_id: currentSessionId || null,
     tracker_path: trackerPath,
@@ -760,11 +768,12 @@ function buildTrackerBackedNativeConsensusDiagnostic(
       evaluation.snapshot,
       evaluation.criticProblem,
     ),
+    planner_problem: evaluation.plannerProblem,
     distinct_thread_ids: architectThreadId && criticThreadId ? architectThreadId !== criticThreadId : null,
     pair_problem: evaluation.pairProblem,
     remediation: [
       'Re-run typed native ralplan Architect/Critic reviews on a surface with installed agent_type routing.',
-      'Legacy OMX-adapted evidence is unsupported and cannot satisfy this gate.',
+      'For an explicitly amended fallback scope only, re-run authenticated adapted Planner/Architect/Critic lanes with current signed receipts.',
     ],
     docs: 'docs/contracts/ralplan-consensus-gate.md',
   };
@@ -809,6 +818,11 @@ function trackerBackedNativeReviewPairProblem(
   options: RalplanNativeSubagentConsensusOptions,
   snapshot: TrackerSnapshot | null,
 ): string | null {
+  const architectAdapted = evidence.ralplan_architect_review?.provenance_kind === 'omx_adapted';
+  const criticAdapted = evidence.ralplan_critic_review?.provenance_kind === 'omx_adapted';
+  if (architectAdapted !== criticAdapted) {
+    return 'architect and critic reviews must use the same provenance kind; authenticated adapted consensus cannot mix omx_adapted and native_subagent lanes';
+  }
   const architectThreadId = nativeReviewThreadId(evidence.ralplan_architect_review);
   const criticThreadId = nativeReviewThreadId(evidence.ralplan_critic_review);
   if (architectThreadId && criticThreadId && architectThreadId === criticThreadId) {
@@ -829,6 +843,50 @@ function trackerBackedNativeReviewPairProblem(
     snapshot,
     'native subagent',
   );
+}
+
+function adaptedPlannerProblem(
+  evidence: {
+    ralplan_architect_review: Record<string, unknown>;
+    ralplan_critic_review: Record<string, unknown>;
+  },
+  options: RalplanNativeSubagentConsensusOptions,
+  snapshot: TrackerSnapshot | null,
+): string | null {
+  if (evidence.ralplan_architect_review.provenance_kind !== 'omx_adapted'
+    || evidence.ralplan_critic_review.provenance_kind !== 'omx_adapted') return null;
+  const cwd = typeof options.cwd === 'string' ? options.cwd.trim() : '';
+  const sessionId = currentTransitionSessionId(evidence, options);
+  const trackerPath = snapshot?.trackerPath ?? (cwd ? subagentTrackingPath(cwd) : '.omx/state/subagent-tracking.json');
+  const session = asRecord(asRecord(snapshot?.tracking?.sessions)?.[sessionId]);
+  if (!session) return `adapted planner tracker session ${sessionId || 'missing'} is missing in ${trackerPath}`;
+  const architectThreadId = nativeReviewThreadId(evidence.ralplan_architect_review);
+  const architectThread = asRecord(asRecord(session.threads)?.[architectThreadId]);
+  const architectStartedAt = trackerTimestamp(architectThread, ['first_seen_at', 'started_at']);
+  if (architectStartedAt === null) return 'adapted planner sequence cannot verify architect first_seen_at/started_at';
+
+  let firstProblem: string | null = null;
+  for (const [threadId, value] of Object.entries(asRecord(session.threads) ?? {})) {
+    const thread = asRecord(value);
+    if (thread?.kind !== 'subagent' || thread.provenance_kind !== 'omx_adapted' || thread.role !== 'planner') continue;
+    const problem = trackerThreadProblem(
+      snapshot?.tracking ?? null,
+      sessionId,
+      threadId,
+      'planner',
+      trackerPath,
+      cwd || undefined,
+      'omx_adapted',
+    );
+    if (problem) {
+      firstProblem ??= problem;
+      continue;
+    }
+    const plannerCompletedAt = trackerTimestamp(thread, ['completed_at']);
+    if (plannerCompletedAt !== null && plannerCompletedAt < architectStartedAt) return null;
+    firstProblem ??= 'adapted planner must complete strictly before architect first_seen_at/started_at';
+  }
+  return firstProblem ?? 'adapted consensus is missing a completed signed Planner receipt bound to the current policy';
 }
 
 function trackerBackedReviewOrderProblem(
@@ -875,14 +933,11 @@ function trackerBackedNativeReviewProblem(
   options: RalplanNativeSubagentConsensusOptions,
   snapshot: TrackerSnapshot | null,
 ): string | null {
-  if (review?.provenance_kind === 'omx_adapted') {
-    return `${agentRole} review uses unsupported omx_adapted provenance`;
-  }
   return trackerBackedReviewProblem(
     review,
     agentRole,
     options,
-    'native_subagent',
+    review?.provenance_kind === 'omx_adapted' ? 'omx_adapted' : 'native_subagent',
     snapshot,
   );
 }
@@ -924,6 +979,7 @@ function trackerBackedReviewProblem(
     snapshot.trackerPath,
     options.cwd,
     provenanceKind,
+    review,
   );
 }
 
@@ -932,10 +988,11 @@ function trackerThreadProblem(
   tracking: Record<string, unknown> | null,
   sessionId: string,
   threadId: string,
-  agentRole: 'architect' | 'critic',
+  agentRole: 'planner' | 'architect' | 'critic',
   trackerPath: string,
   cwd: string | undefined,
   provenanceKind: 'native_subagent' | 'omx_adapted',
+  review?: Record<string, unknown>,
 ): string | null {
   const laneLabel = provenanceKind === 'native_subagent' ? 'native' : provenanceKind;
 
@@ -968,7 +1025,65 @@ function trackerThreadProblem(
   if (trackerRoleIdentity && trackerRoleIdentity !== agentRole) {
     return `${agentRole} tracker thread ${threadId} has ${trackerRole ? 'role' : 'mode'}=${trackerRoleIdentity}, expected ${agentRole}`;
   }
+  if (provenanceKind === 'omx_adapted') {
+    const receiptProblem = adaptedReceiptProblem(session, thread, review, agentRole, sessionId, threadId, cwd);
+    if (receiptProblem) return receiptProblem;
+  }
   return null;
+}
+
+function adaptedReceiptProblem(
+  session: Record<string, unknown>,
+  thread: Record<string, unknown>,
+  review: Record<string, unknown> | undefined,
+  agentRole: 'planner' | 'architect' | 'critic',
+  sessionId: string,
+  threadId: string,
+  cwd: string | undefined,
+): string | null {
+  if (!cwd) return `${agentRole} adapted receipt cannot resolve cwd`;
+  const policyResult = readValidAdaptedProvenancePolicy(cwd, sessionId);
+  if (!policyResult.ok) return `${agentRole} adapted policy is invalid: ${policyResult.reason}`;
+  const receipt = asRecord(thread.adapted_receipt);
+  if (!receipt) return `${agentRole} tracker thread ${threadId} is missing an authenticated adapted receipt`;
+  const fields = ['scope', 'policy_id', 'session_id', 'origin_cwd', 'plan_path', 'plan_sha256', 'launch_id', 'issued_at', 'expires_at', 'parent_thread_id', 'child_thread_id', 'role', 'correlation_token', 'signature'];
+  if (fields.some((key) => typeof receipt[key] !== 'string' || !(receipt[key] as string).trim())) return `${agentRole} adapted receipt is malformed`;
+  const policy = policyResult.policy;
+  if (receipt.scope !== policy.scope || receipt.policy_id !== policy.policyId || receipt.session_id !== sessionId
+    || receipt.origin_cwd !== policy.originCwd || receipt.plan_path !== policy.planPath || receipt.plan_sha256 !== policy.planSha256
+    || receipt.launch_id !== policy.launchId || receipt.issued_at !== policy.issuedAt || receipt.expires_at !== policy.expiresAt) {
+    return `${agentRole} adapted receipt does not match the active signed policy`;
+  }
+  if (receipt.parent_thread_id === receipt.child_thread_id || receipt.child_thread_id !== threadId || receipt.role !== agentRole) {
+    return `${agentRole} adapted receipt has invalid parent/child/role binding`;
+  }
+  const leaderThreadId = typeof session.leader_thread_id === 'string' ? session.leader_thread_id.trim() : '';
+  if (!leaderThreadId || receipt.parent_thread_id !== leaderThreadId) return `${agentRole} adapted receipt does not bind the current leader`;
+  if (review && (review.adapted_policy_id !== receipt.policy_id || review.adapted_receipt_signature !== receipt.signature)) {
+    return `${agentRole} review does not carry the exact adapted policy and receipt evidence`;
+  }
+  const signatureValid = verifyAdaptedProvenanceReceipt({
+    scope: receipt.scope as string,
+    policyId: receipt.policy_id as string,
+    sessionId: receipt.session_id as string,
+    originCwd: receipt.origin_cwd as string,
+    planPath: receipt.plan_path as string,
+    planSha256: receipt.plan_sha256 as string,
+    launchId: receipt.launch_id as string,
+    issuedAt: receipt.issued_at as string,
+    expiresAt: receipt.expires_at as string,
+    parentThreadId: receipt.parent_thread_id as string,
+    childThreadId: receipt.child_thread_id as string,
+    role: receipt.role as string,
+    correlationToken: receipt.correlation_token as string,
+  }, receipt.signature as string);
+  if (!signatureValid) return `${agentRole} adapted receipt signature is invalid`;
+  const duplicate = Object.entries(asRecord(session.threads) ?? {}).some(([candidateThreadId, candidateThread]) => {
+    if (candidateThreadId === threadId) return false;
+    const candidateReceipt = asRecord(asRecord(candidateThread)?.adapted_receipt);
+    return candidateReceipt?.signature === receipt.signature;
+  });
+  return duplicate ? `${agentRole} adapted receipt is replayed by another tracker thread` : null;
 }
 
 function currentSessionNativeLeaderThreadId(cwd: string | undefined): string {

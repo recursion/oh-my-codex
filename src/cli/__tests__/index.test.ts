@@ -85,6 +85,7 @@ import {
   releaseTmuxExtendedKeysLease,
   withTmuxExtendedKeys,
   serializeDetachedSessionParentEnv,
+  serializeDetachedWindowsSessionParentEnv,
   buildInsideTmuxHudHookEnv,
   registerInsideTmuxHudResizeHook,
   buildDetachedHudHookEnv,
@@ -5877,6 +5878,49 @@ describe("buildWindowsPromptCommand", () => {
       decoded,
       "$ErrorActionPreference = 'Stop'; & { & 'codex' '--dangerously-bypass-approvals-and-sandbox' '-c' 'model_reasoning_effort=\"high\"' 'it''s' }",
     );
+  });
+
+  it("sources the detached Windows launch environment without exposing its authorization in pane text", () => {
+    const envFilePath = "C:\\Users\\Ada O'Brien\\.omx\\runtime\\tmux-env\\session.ps1";
+    const launchId = "7a98483c-7bbb-44b7-9926-5ab788d0beba";
+    const launchToken = "a".repeat(64);
+    const envScript = serializeDetachedWindowsSessionParentEnv({
+      OMX_CODEX_LAUNCH_ID: launchId,
+      OMX_CODEX_LAUNCH_TOKEN: launchToken,
+      OMX_ENTRY_PATH: "C:\\Program Files\\omx\\dist\\cli\\omx.js",
+      OMX_SESSION_ID: "omx-detached-session",
+      CUSTOM_LLM_API_KEY: "it's literal; $notExpanded",
+      TMUX: "outer tmux socket",
+      "not-a-shell-name": "ignored",
+    });
+    const result = buildWindowsPromptCommand("codex", ["--model", "gpt-5"], envFilePath);
+    const scheduledBootstrap = buildDetachedWindowsBootstrapScript("omx-demo", result, 2500, "tmux.exe", envFilePath);
+    const prefix = "powershell.exe -NoLogo -NoExit -EncodedCommand ";
+    assert.ok(result.startsWith(prefix));
+    const decoded = Buffer.from(result.slice(prefix.length), "base64").toString("utf16le");
+
+    assert.match(envScript, new RegExp(`Env:OMX_CODEX_LAUNCH_ID' -Value '${launchId}`));
+    assert.match(envScript, new RegExp(`Env:OMX_CODEX_LAUNCH_TOKEN' -Value '${launchToken}`));
+    assert.match(envScript, /Env:OMX_ENTRY_PATH' -Value 'C:\\Program Files\\omx\\dist\\cli\\omx\.js'/);
+    assert.match(envScript, /Env:OMX_SESSION_ID' -Value 'omx-detached-session'/);
+    assert.match(envScript, /Env:CUSTOM_LLM_API_KEY' -Value 'it''s literal; \$notExpanded'/);
+    assert.doesNotMatch(envScript, /Env:TMUX'/);
+    assert.doesNotMatch(envScript, /not-a-shell-name/);
+
+    assert.ok(decoded.includes(`. '${envFilePath.replace(/'/g, "''")}'`));
+    assert.match(decoded, /Remove-Item -LiteralPath /);
+    assert.match(decoded, /& \{ & 'codex' '--model' 'gpt-5' \}/);
+    assert.doesNotMatch(decoded, new RegExp(launchToken));
+    assert.doesNotMatch(decoded, /CUSTOM_LLM_API_KEY/);
+    assert.ok(
+      scheduledBootstrap.includes(JSON.stringify(result)),
+      "the scheduled tmux send-keys invocation must receive the environment-sourcing Codex command",
+    );
+    assert.ok(
+      scheduledBootstrap.includes(JSON.stringify(envFilePath)),
+      "the scheduled bootstrap must remove the private environment file if pane delivery fails",
+    );
+    assert.match(scheduledBootstrap, /rmSync\(cleanupPath, \{ force: true \}\)/);
   });
 });
 

@@ -4,9 +4,9 @@
 
 ## Decision
 
-Treat adapted Ralplan role routing as unsupported on the documented Codex CLI 0.144.5 hook surface. The surface does not provide a documented, positive root-to-`PreToolUse` identity proof. When native role routing reports `role_routing_unavailable`, Ralplan runs an explicit fail-closed CLI preflight after keyword selection but before substantive planner/reviewer work, HUD/runtime activation, or adapted authority.
+Treat adapted Ralplan role routing as default-denied on the documented Codex CLI 0.144.5 hook surface. The surface does not provide a documented, positive root-to-`PreToolUse` identity proof. When native role routing reports `role_routing_unavailable`, Ralplan runs an explicit fail-closed CLI preflight after keyword selection but before substantive planner/reviewer work, HUD/runtime activation, or adapted authority; normal preflight failure stops the workflow.
 
-Keep typed native routing as the preferred path where the native spawn surface exposes `agent_type`: callers select an installed OMX role explicitly. On a role-routing-unavailable surface, the adapted role path is unavailable rather than silently weakened. Do not substitute prompt labels, inferred identities, or unvalidated carriers.
+Keep typed native routing as the preferred path where the native spawn surface exposes `agent_type`: callers select an installed OMX role explicitly. Outside the reviewed exception in ADR 3195, the adapted role path is unavailable rather than silently weakened. ADR 3195 permits only a reviewed, explicitly amended plan with a current acknowledged policy that passes `omx ralplan preflight --adapted-provenance --json`; it is a narrowly authenticated exception, not categorical adapted-route availability. Do not substitute prompt labels, inferred identities, or unvalidated carriers.
 
 ## Drivers
 
@@ -25,15 +25,17 @@ This ADR is limited to the documented Codex CLI **0.144.5** hook contract evalua
 
 Structural routing carriers are routing data, not authority. The unsupported boundary is selected by the native task surface reporting `role_routing_unavailable`, not inferred from hook payload shape. Typed native `agent_type` routing remains enabled and unchanged.
 
-## Exact output contract
+## Default-deny output contract
 
-The explicit `omx ralplan preflight --json` result is exactly:
+When normal preflight fails for unsupported documented leader proof, the explicit `omx ralplan preflight --json` result is exactly:
 
 ```json
 {"ok":false,"reason":"unsupported_documented_leader_proof"}
 ```
 
-A canonical standalone `omx ralplan role-intent write --role <role> --parent-thread "$CODEX_THREAD_ID" --json` request for an installed role is denied by `PreToolUse` with exactly:
+That failure remains the default-deny result. The ADR 3195 exception is available only to its reviewed, explicitly amended plan with a current acknowledged policy, and only after `omx ralplan preflight --adapted-provenance --json` passes; it does not change the normal preflight diagnostic or convert undocumented hook fields into leader proof.
+
+Outside the ADR 3195 exception, a canonical standalone `omx ralplan role-intent write --role <role> --parent-thread "$CODEX_THREAD_ID" --json` request for an installed role is denied by `PreToolUse` with exactly:
 
 ```text
 unsupported_documented_leader_proof: Codex 0.144.5 hooks do not expose documented root identity required for adapted Ralplan.
@@ -60,22 +62,22 @@ Failing closed only after the runtime surface identifies the adapted path is the
 
 ## Compatibility and migration
 
-Existing routing-capable callers continue to use explicit `agent_type` with an installed OMX role. Callers on role-routing-unavailable documented 0.144.5 surfaces run `omx ralplan preflight --json` and stop on `unsupported_documented_leader_proof`; they must use a Codex surface with documented root proof or a reviewed alternative workflow. There is no compatibility shim that turns old session/thread/pointer evidence into authority.
+Existing routing-capable callers continue to use explicit `agent_type` with an installed OMX role. Callers on role-routing-unavailable documented 0.144.5 surfaces run `omx ralplan preflight --json` and stop on `unsupported_documented_leader_proof` by default; they must use a Codex surface with documented root proof or a reviewed alternative workflow. ADR 3195's amended-plan exception may proceed only with its current acknowledged policy and a passing `omx ralplan preflight --adapted-provenance --json`. There is no compatibility shim that turns old session/thread/pointer evidence into authority.
 
 ## Consequences
 
-- Adapted Ralplan is unavailable when the native surface reports `role_routing_unavailable`.
-- Direct role-intent writes fail deterministically with `unsupported_documented_leader_proof` for installed roles.
-- Keyword routing may seed ordinary Ralplan selection state before the model can inspect the native task schema; that state is not authority. The explicit preflight neutralizes it before returning failure, so it cannot drive HUD/runtime or Stop enforcement. The direct hook denial creates no role intent, adapted tracker authority, routing marker, or reviewer work.
+- Adapted Ralplan is unavailable when the native surface reports `role_routing_unavailable`, except for the reviewed, explicitly amended ADR 3195 policy that passes adapted-provenance preflight.
+- Direct role-intent writes outside the ADR 3195 exception fail deterministically with `unsupported_documented_leader_proof` for installed roles.
+- Keyword routing may seed ordinary Ralplan selection state before the model can inspect the native task schema; that state is not authority. On the default-deny path, the explicit preflight neutralizes it before returning failure, so it cannot drive HUD/runtime or Stop enforcement. The direct hook denial creates no role intent, adapted tracker authority, routing marker, or reviewer work.
 - Typed native role-routing guidance remains valid where `agent_type` is exposed; it is not disabled by hook-payload heuristics.
 
 ## Rollback
 
-Rollback is removal of this unsupported-only gate and associated guidance only after the future enablement criterion is met and a reviewed replacement has been released. Do not roll back by adding heuristic identity inference or a compatibility fallback.
+Rollback is removal of this default-deny gate and associated guidance only after the future enablement criterion is met and a reviewed replacement has been released. Do not roll back by adding heuristic identity inference or a compatibility fallback.
 
 ## Future enablement criterion
 
-Enable adapted Ralplan only when the official documentation for the target Codex version and hook/spawn surface defines a positive, stable binding from the current `PreToolUse` event to the root leader identity required by the workflow, and the implementation can validate that binding before any planner, state, HUD, runtime, or role-intent work. The evidence must distinguish root and child contexts without using undocumented IDs, pointer/transcript/cwd state, or absence-based inference.
+Enable adapted Ralplan generally only when the official documentation for the target Codex version and hook/spawn surface defines a positive, stable binding from the current `PreToolUse` event to the root leader identity required by the workflow, and the implementation can validate that binding before any planner, state, HUD, runtime, or role-intent work. The evidence must distinguish root and child contexts without using undocumented IDs, pointer/transcript/cwd state, or absence-based inference. ADR 3195 remains a reviewed, authenticated amended-plan exception rather than general enablement.
 
 ## Follow-ups
 

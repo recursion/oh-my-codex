@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash, createHmac } from 'node:crypto';
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, sep } from 'node:path';
@@ -15,6 +16,13 @@ import {
   OMX_PLUGIN_MCP_COMMAND,
   OMX_PLUGIN_MCP_SERVE_SUBCOMMAND,
 } from '../../config/omx-first-party-mcp.js';
+import {
+  __setNativeAnchorAuthRootForTest,
+  issueNativeLaunchAuthorization,
+  NATIVE_LAUNCH_AUTHORIZATION_TTL_MS,
+  OMX_CODEX_LAUNCH_TOKEN_ENV,
+  signNativeLaunchAuthorization,
+} from '../../subagents/native-anchor-auth.js';
 
 type PackageJson = {
   version: string;
@@ -218,34 +226,31 @@ async function assertPluginHookLaunchesPostCompactFromCache(): Promise<void> {
   await writeOmxShim(shimDir);
 
   try {
-    const payload = JSON.stringify({
+    await withPluginAnchorTestHarness(cachePluginRoot, cacheRoot, async () => {
+      const payload = JSON.stringify({
       hook_event_name: 'PostCompact',
       session_id: 'omx-plugin-hook-postcompact-smoke',
       transcript_path: join(cacheRoot, 'missing-transcript.jsonl'),
       cwd: cacheRoot,
-    });
-    const result = spawnSync(process.execPath, [join(cachePluginRoot, 'hooks', 'codex-native-hook.mjs')], {
-      cwd: cachePluginRoot,
-      encoding: 'utf-8',
-      input: payload,
-      env: {
-        ...process.env,
-        PATH: `${shimDir}${delimiter}${process.env.PATH || ''}`,
-        OMX_AUTO_UPDATE: '0',
-        OMX_NOTIFY_FALLBACK: '0',
-        OMX_HOOK_DERIVED_SIGNALS: '0',
-        OMX_ROOT: join(cacheRoot, '.omx-root'),
-        OMX_SESSION_ID: 'omx-plugin-hook-postcompact-smoke',
-        OMX_SOURCE_CWD: cacheRoot,
-        OMX_ENTRY_PATH: omxBin,
-        OMX_CODEX_LAUNCH_ID: 'omx-plugin-hook-postcompact-smoke-launch',
-        OMX_STARTUP_CWD: cacheRoot,
-      },
-    });
+      });
+      const launchEnv = issuePluginLaunchAuth(cacheRoot, pluginHookEnv({
+      CODEX_HOME: join(cacheRoot, '.codex-home'),
+      PATH: `${shimDir}${delimiter}${process.env.PATH || ''}`,
+      OMX_AUTO_UPDATE: '0',
+      OMX_NOTIFY_FALLBACK: '0',
+      OMX_HOOK_DERIVED_SIGNALS: '0',
+      OMX_ROOT: join(cacheRoot, '.omx-root'),
+      OMX_SESSION_ID: 'omx-plugin-hook-postcompact-smoke',
+      OMX_SOURCE_CWD: cacheRoot,
+      OMX_CODEX_LAUNCH_ID: 'omx-plugin-hook-postcompact-smoke-launch',
+      OMX_STARTUP_CWD: cacheRoot,
+      }));
+      const result = runPluginNativeHook(cachePluginRoot, payload, launchEnv, { autoAuthorize: false });
 
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.equal(result.stdout, '', 'PostCompact plugin hook launcher should emit no stdout');
-    assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND|Cannot find module/);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(result.stdout, '', 'PostCompact plugin hook launcher should emit no stdout');
+      assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND|Cannot find module/);
+    });
   } finally {
     await rm(cacheRoot, { recursive: true, force: true });
   }
@@ -276,34 +281,31 @@ async function assertPluginHookDelegatesPostCompactToPinnedCommand(): Promise<vo
   });
 
   try {
-    const payload = JSON.stringify({
+    await withPluginAnchorTestHarness(cachePluginRoot, cacheRoot, async () => {
+      const payload = JSON.stringify({
       hook_event_name: 'PostCompact',
       session_id: 'omx-plugin-hook-postcompact-delegate',
       transcript_path: join(cacheRoot, 'missing-transcript.jsonl'),
       cwd: cacheRoot,
-    });
-    const result = spawnSync(process.execPath, [join(cachePluginRoot, 'hooks', 'codex-native-hook.mjs')], {
-      cwd: cachePluginRoot,
-      encoding: 'utf-8',
-      input: payload,
-      env: {
-        ...process.env,
-        OMX_AUTO_UPDATE: '0',
-        OMX_NOTIFY_FALLBACK: '0',
-        OMX_HOOK_DERIVED_SIGNALS: '0',
-        OMX_ROOT: join(cacheRoot, '.omx-root'),
-        OMX_SESSION_ID: 'omx-plugin-hook-postcompact-delegate',
-        OMX_SOURCE_CWD: cacheRoot,
-        OMX_ENTRY_PATH: omxBin,
-        OMX_CODEX_LAUNCH_ID: 'omx-plugin-hook-postcompact-delegate-launch',
-        OMX_STARTUP_CWD: cacheRoot,
-      },
-    });
+      });
+      const launchEnv = issuePluginLaunchAuth(cacheRoot, pluginHookEnv({
+      CODEX_HOME: join(cacheRoot, '.codex-home'),
+      OMX_AUTO_UPDATE: '0',
+      OMX_NOTIFY_FALLBACK: '0',
+      OMX_HOOK_DERIVED_SIGNALS: '0',
+      OMX_ROOT: join(cacheRoot, '.omx-root'),
+      OMX_SESSION_ID: 'omx-plugin-hook-postcompact-delegate',
+      OMX_SOURCE_CWD: cacheRoot,
+      OMX_CODEX_LAUNCH_ID: 'omx-plugin-hook-postcompact-delegate-launch',
+      OMX_STARTUP_CWD: cacheRoot,
+      }));
+      const result = runPluginNativeHook(cachePluginRoot, payload, launchEnv, { autoAuthorize: false });
 
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.equal(result.stdout, '', 'PostCompact plugin hook launcher should emit no stdout when delegate is quiet');
-    assert.deepEqual(JSON.parse(await readFile(argsPath, 'utf-8')), ['codex-native-hook']);
-    assert.deepEqual(JSON.parse(await readFile(stdinPath, 'utf-8')), JSON.parse(payload));
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(result.stdout, '', 'PostCompact plugin hook launcher should emit no stdout when delegate is quiet');
+      assert.deepEqual(JSON.parse(await readFile(argsPath, 'utf-8')), ['codex-native-hook']);
+      assert.deepEqual(JSON.parse(await readFile(stdinPath, 'utf-8')), JSON.parse(payload));
+    });
   } finally {
     await rm(cacheRoot, { recursive: true, force: true });
   }
@@ -361,12 +363,38 @@ function oversizedToolHookOutput(eventName: 'PreToolUse' | 'PostToolUse'): Recor
     ? { systemMessage: OVERSIZED_STDIN_SYSTEM_MESSAGE, hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: OVERSIZED_STDIN_SYSTEM_MESSAGE } }
     : { continue: false, stopReason: 'native_hook_stdin_oversized', systemMessage: OVERSIZED_STDIN_SYSTEM_MESSAGE };
 }
+
+const pluginAnchorTestHarnesses = new Map<string, { home: string; preloadPath: string }>();
+
+async function withPluginAnchorTestHarness<T>(cachePluginRoot: string, cacheRoot: string, run: () => Promise<T>): Promise<T> {
+  const home = join(cacheRoot, 'os-user-home');
+  const anchorRoot = join(home, '.omx', 'native-anchor-auth', 'v1');
+  const preloadPath = join(cacheRoot, 'native-anchor-user-info-preload.cjs');
+  await writeFile(preloadPath, [
+    "const os = require('node:os');",
+    "const { syncBuiltinESMExports } = require('node:module');",
+    "const home = process.env.OMX_TEST_NATIVE_ANCHOR_HOME;",
+    "if (!home) throw new Error('missing test native anchor home');",
+    "os.userInfo = () => ({ username: 'omx-test', uid: 1, gid: 1, shell: '', homedir: home });",
+    'syncBuiltinESMExports();',
+    '',
+  ].join('\n'), 'utf-8');
+  __setNativeAnchorAuthRootForTest(anchorRoot);
+  pluginAnchorTestHarnesses.set(cachePluginRoot, { home, preloadPath });
+  try {
+    return await run();
+  } finally {
+    pluginAnchorTestHarnesses.delete(cachePluginRoot);
+    __setNativeAnchorAuthRootForTest();
+  }
+}
+
 async function withPluginCacheCopy<T>(run: (cachePluginRoot: string, cacheRoot: string) => Promise<T>): Promise<T> {
   const cacheRoot = await mkdtemp(join(tmpdir(), 'omx-plugin-hook-cache-'));
   const cachePluginRoot = join(cacheRoot, pluginName, 'local');
   await cp(pluginRoot, cachePluginRoot, { recursive: true });
   try {
-    return await run(cachePluginRoot, cacheRoot);
+    return await withPluginAnchorTestHarness(cachePluginRoot, cacheRoot, () => run(cachePluginRoot, cacheRoot));
   } finally {
     await rm(cacheRoot, { recursive: true, force: true });
   }
@@ -382,6 +410,7 @@ function pluginHookEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     'CODEX_SESSION_ID',
     'OMX_ENTRY_PATH',
     'OMX_CODEX_LAUNCH_ID',
+    OMX_CODEX_LAUNCH_TOKEN_ENV,
     'OMX_STARTUP_CWD',
   ]) {
     delete env[key];
@@ -390,22 +419,61 @@ function pluginHookEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     ...env,
     OMX_ENTRY_PATH: omxBin,
     OMX_CODEX_LAUNCH_ID: 'omx-plugin-layout-launch',
+    [OMX_CODEX_LAUNCH_TOKEN_ENV]: 'c'.repeat(64),
+    OMX_SESSION_ID: 'omx-plugin-layout-session',
     OMX_STARTUP_CWD: root,
     ...overrides,
   };
+}
+
+function issuePluginLaunchAuth(cwd: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const authorization = issueNativeLaunchAuthorization({
+    cwd,
+    sessionId: env.OMX_SESSION_ID!,
+    launchId: env.OMX_CODEX_LAUNCH_ID!,
+    token: env[OMX_CODEX_LAUNCH_TOKEN_ENV]!,
+    env,
+  });
+  assert.ok(authorization, 'expected test launch authorization');
+  return env;
 }
 
 function runPluginNativeHook(
   cachePluginRoot: string,
   input: string,
   env: NodeJS.ProcessEnv = {},
+  options: { autoAuthorize?: boolean } = {},
 ) {
-  return spawnSync(process.execPath, [join(cachePluginRoot, 'hooks', 'codex-native-hook.mjs')], {
+  const launchEnv = pluginHookEnv({
+    CODEX_HOME: join(cachePluginRoot, '.codex-home'),
+    ...env,
+  });
+  if (options.autoAuthorize !== false
+    && launchEnv.OMX_ENTRY_PATH?.trim()
+    && launchEnv.OMX_CODEX_LAUNCH_ID?.trim()
+    && launchEnv[OMX_CODEX_LAUNCH_TOKEN_ENV]?.trim()
+    && launchEnv.OMX_SESSION_ID?.trim()) {
+    let payload: { cwd?: unknown } = {};
+    try { payload = JSON.parse(input) as { cwd?: unknown }; } catch {}
+    const cwd = typeof payload.cwd === 'string' && payload.cwd.trim() ? payload.cwd : cachePluginRoot;
+    issueNativeLaunchAuthorization({
+      cwd,
+      sessionId: launchEnv.OMX_SESSION_ID,
+      launchId: launchEnv.OMX_CODEX_LAUNCH_ID,
+      token: launchEnv[OMX_CODEX_LAUNCH_TOKEN_ENV],
+      env: launchEnv,
+    });
+  }
+  const harness = pluginAnchorTestHarnesses.get(cachePluginRoot);
+  return spawnSync(process.execPath, [
+    ...(harness ? ['--require', harness.preloadPath] : []),
+    join(cachePluginRoot, 'hooks', 'codex-native-hook.mjs'),
+  ], {
     cwd: cachePluginRoot,
     input,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: pluginHookEnv(env),
+    env: harness ? { ...launchEnv, OMX_TEST_NATIVE_ANCHOR_HOME: harness.home } : launchEnv,
   });
 }
 
@@ -494,6 +562,36 @@ describe('official Codex plugin layout', () => {
     assert.doesNotMatch(launcher, /shell:\s*process\.platform === 'win32'/);
   });
 
+  it('fails closed instead of delegating when the plugin anchor key is group/world readable', async () => {
+    if (process.platform === 'win32') return;
+    await withPluginCacheCopy(async (cachePluginRoot, cacheRoot) => {
+      const codexHome = join(cacheRoot, 'codex-home');
+      const keyPath = join(cacheRoot, 'os-user-home', '.omx', 'native-anchor-auth', 'v1', 'key');
+      const calledPath = join(cacheRoot, 'called.txt');
+      const commandPath = join(cacheRoot, 'record-called.sh');
+      await mkdir(dirname(keyPath), { recursive: true, mode: 0o700 });
+      await writeFile(keyPath, Buffer.alloc(32, 7), { mode: 0o600 });
+      await chmod(keyPath, 0o644);
+      await writeFile(commandPath, `#!/bin/sh\necho called > "${calledPath}"\nprintf '{}\\n'\n`, 'utf-8');
+      await chmod(commandPath, 0o755);
+
+      const result = runPluginNativeHook(
+        cachePluginRoot,
+        JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 'insecure-key-session', prompt: '$ralplan smoke' }),
+        {
+          CODEX_HOME: codexHome,
+          OMX_ROOT: join(cacheRoot, '.omx-root'),
+          OMX_NATIVE_HOOK_COMMAND: commandPath,
+        },
+        { autoAuthorize: false },
+      );
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(result.stdout, '');
+      await assert.rejects(readFile(calledPath, 'utf-8'), { code: 'ENOENT' });
+    });
+  });
+
   it('no-ops plugin hooks when Codex was not launched through omx', async () => {
     await withPluginCacheCopy(async (cachePluginRoot, cacheRoot) => {
       const calledPath = join(cacheRoot, 'called.txt');
@@ -580,6 +678,193 @@ describe('official Codex plugin layout', () => {
       assert.equal(oversizedStop.status, 0, oversizedStop.stderr || oversizedStop.stdout);
       assert.deepEqual(parseSingleJsonStdout(oversizedStop.stdout), {});
       await assert.rejects(readFile(calledPath, 'utf-8'), { code: 'ENOENT' });
+    });
+  });
+
+  it('does not mint a launcher claim from spoofed environment variables', async () => {
+    await withPluginCacheCopy(async (cachePluginRoot, cacheRoot) => {
+      const calledPath = join(cacheRoot, 'spoofed-called.txt');
+      const commandPath = join(cacheRoot, process.platform === 'win32' ? 'spoofed-called.cmd' : 'spoofed-called.sh');
+      if (process.platform === 'win32') {
+        await writeFile(commandPath, `@echo off\r\necho called > "${calledPath}"\r\necho {}\r\n`, 'utf-8');
+      } else {
+        await writeFile(commandPath, `#!/bin/sh\necho called > "${calledPath}"\nprintf '{}\\n'\n`, 'utf-8');
+        await chmod(commandPath, 0o755);
+      }
+      const result = runPluginNativeHook(
+        cachePluginRoot,
+        JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 'spoofed-native-session', cwd: cachePluginRoot, prompt: '$ralplan spoof' }),
+        {
+          OMX_ENTRY_PATH: omxBin,
+          OMX_CODEX_LAUNCH_ID: 'spoofed-launch-id',
+          [OMX_CODEX_LAUNCH_TOKEN_ENV]: 'd'.repeat(64),
+          OMX_SESSION_ID: 'spoofed-canonical-session',
+          OMX_NATIVE_HOOK_COMMAND: commandPath,
+          CODEX_HOME: join(cacheRoot, '.codex-home'),
+        },
+        { autoAuthorize: false },
+      );
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(result.stdout, '');
+      await assert.rejects(readFile(calledPath, 'utf-8'), { code: 'ENOENT' });
+      await assert.rejects(
+        readFile(join(cacheRoot, 'os-user-home', '.omx', 'native-anchor-auth', 'v1', 'launch-claims', 'spoofed-launch-id.json'), 'utf-8'),
+        { code: 'ENOENT' },
+      );
+    });
+  });
+
+  it('rejects attacker-preseeded CODEX_HOME and OMX_ROOT authorization roots', async () => {
+    await withPluginCacheCopy(async (cachePluginRoot, cacheRoot) => {
+      const fakeCodexHome = join(cacheRoot, 'attacker-codex-home');
+      const fakeOmxRoot = join(cacheRoot, 'attacker-omx-root');
+      const launchId = 'attacker-forged-launch';
+      const token = 'e'.repeat(64);
+      const sessionId = 'attacker-forged-session';
+      const fakeKey = Buffer.alloc(32, 23);
+      const fakeKeyPath = join(fakeCodexHome, '.omx', 'native-anchor-auth.key');
+      const fakeAuthorizationPath = join(fakeOmxRoot, 'state', 'plugin-hook-launch-authorizations', `${launchId}.json`);
+      const fakeClaimPath = join(fakeOmxRoot, 'state', 'plugin-hook-launches', `${launchId}.json`);
+      const calledPath = join(cacheRoot, 'attacker-called.txt');
+      const commandPath = join(cacheRoot, process.platform === 'win32' ? 'attacker-recorder.cmd' : 'attacker-recorder.sh');
+      await mkdir(dirname(fakeKeyPath), { recursive: true, mode: 0o700 });
+      await mkdir(dirname(fakeAuthorizationPath), { recursive: true, mode: 0o700 });
+      await writeFile(fakeKeyPath, fakeKey, { mode: 0o600 });
+      if (process.platform === 'win32') {
+        await writeFile(commandPath, `@echo off\r\necho called > "${calledPath}"\r\necho {}\r\n`, 'utf-8');
+      } else {
+        await writeFile(commandPath, `#!/bin/sh\necho called > "${calledPath}"\nprintf '{}\\n'\n`, 'utf-8');
+        await chmod(commandPath, 0o755);
+      }
+      const issuedAt = new Date(Date.now() - 1_000).toISOString();
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      const authorization = {
+        schema_version: 1,
+        authorizationId: '11111111-1111-4111-8111-111111111111',
+        launchId,
+        tokenSha256: createHash('sha256').update(token).digest('hex'),
+        sessionId,
+        originCwd: cachePluginRoot,
+        issuedAt,
+        expiresAt,
+        signature: '',
+      };
+      authorization.signature = createHmac('sha256', fakeKey).update([
+        'native-launch-authorization-v1',
+        authorization.authorizationId,
+        authorization.launchId,
+        authorization.tokenSha256,
+        authorization.sessionId,
+        authorization.originCwd,
+        authorization.issuedAt,
+        authorization.expiresAt,
+      ].join('\0')).digest('hex');
+      await writeFile(fakeAuthorizationPath, `${JSON.stringify(authorization)}\n`, { mode: 0o600 });
+
+      const result = runPluginNativeHook(
+        cachePluginRoot,
+        JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 'attacker-native-session', cwd: cachePluginRoot, prompt: '$ralplan forged' }),
+        {
+          CODEX_HOME: fakeCodexHome,
+          OMX_ROOT: fakeOmxRoot,
+          OMX_ENTRY_PATH: omxBin,
+          OMX_CODEX_LAUNCH_ID: launchId,
+          [OMX_CODEX_LAUNCH_TOKEN_ENV]: token,
+          OMX_SESSION_ID: sessionId,
+          OMX_NATIVE_HOOK_COMMAND: commandPath,
+        },
+        { autoAuthorize: false },
+      );
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(result.stdout, '');
+      await assert.rejects(readFile(calledPath, 'utf-8'), { code: 'ENOENT' });
+      await assert.rejects(readFile(fakeClaimPath, 'utf-8'), { code: 'ENOENT' });
+      await assert.rejects(
+        readFile(join(cacheRoot, 'os-user-home', '.omx', 'native-anchor-auth', 'v1', 'launch-claims', `${launchId}.json`), 'utf-8'),
+        { code: 'ENOENT' },
+      );
+    });
+  });
+
+  it('uses only the stable anchor and rejects every mismatched launch binding', async () => {
+    await withPluginCacheCopy(async (cachePluginRoot, cacheRoot) => {
+      const fakeCodexHome = join(cacheRoot, 'decoy-codex-home');
+      const fakeOmxRoot = join(cacheRoot, 'decoy-omx-root');
+      const stableRoot = join(cacheRoot, 'os-user-home', '.omx', 'native-anchor-auth', 'v1');
+      const calledPath = join(cacheRoot, 'binding-called.txt');
+      const commandPath = join(cacheRoot, process.platform === 'win32' ? 'binding-recorder.cmd' : 'binding-recorder.sh');
+      if (process.platform === 'win32') {
+        await writeFile(commandPath, `@echo off\r\necho called > "${calledPath}"\r\necho {}\r\n`, 'utf-8');
+      } else {
+        await writeFile(commandPath, `#!/bin/sh\necho called > "${calledPath}"\nprintf '{}\\n'\n`, 'utf-8');
+        await chmod(commandPath, 0o755);
+      }
+      const baseEnv = (launchId: string) => pluginHookEnv({
+        CODEX_HOME: fakeCodexHome,
+        OMX_ROOT: fakeOmxRoot,
+        OMX_ENTRY_PATH: omxBin,
+        OMX_CODEX_LAUNCH_ID: launchId,
+        [OMX_CODEX_LAUNCH_TOKEN_ENV]: 'f'.repeat(64),
+        OMX_SESSION_ID: `binding-${launchId}`,
+        OMX_NATIVE_HOOK_COMMAND: commandPath,
+      });
+      const inputFor = (nativeSessionId: string, cwd = cachePluginRoot) => JSON.stringify({
+        hook_event_name: 'UserPromptSubmit', session_id: nativeSessionId, cwd, prompt: '$ralplan binding',
+      });
+
+      const validLaunchId = 'binding-valid';
+      const validEnv = baseEnv(validLaunchId);
+      issuePluginLaunchAuth(cachePluginRoot, validEnv);
+      const valid = runPluginNativeHook(cachePluginRoot, inputFor('binding-native-valid'), validEnv, { autoAuthorize: false });
+      assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+      assert.equal((await readFile(calledPath, 'utf-8')).trim(), 'called');
+      await rm(calledPath, { force: true });
+      await readFile(join(stableRoot, 'launch-claims', `${validLaunchId}.json`), 'utf-8');
+
+      const assertDenied = async (
+        name: string,
+        mutate: (context: { env: NodeJS.ProcessEnv; authorizationPath: string; authorization: Record<string, string> }) => Promise<{ input?: string } | void>,
+      ) => {
+        const launchId = `binding-${name}`;
+        const env = baseEnv(launchId);
+        const authorization = issueNativeLaunchAuthorization({
+          cwd: cachePluginRoot,
+          sessionId: env.OMX_SESSION_ID!,
+          launchId,
+          token: env[OMX_CODEX_LAUNCH_TOKEN_ENV]!,
+          env,
+        });
+        assert.ok(authorization);
+        const authorizationPath = join(stableRoot, 'launch-authorizations', `${launchId}.json`);
+        const mutation = await mutate({ env, authorizationPath, authorization: authorization as unknown as Record<string, string> });
+        const result = runPluginNativeHook(cachePluginRoot, mutation?.input ?? inputFor(`binding-native-${name}`), env, { autoAuthorize: false });
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.equal(result.stdout, '');
+        await assert.rejects(readFile(calledPath, 'utf-8'), { code: 'ENOENT' });
+        await assert.rejects(readFile(join(stableRoot, 'launch-claims', `${launchId}.json`), 'utf-8'), { code: 'ENOENT' });
+      };
+
+      await assertDenied('wrong-token', async ({ env }) => { env[OMX_CODEX_LAUNCH_TOKEN_ENV] = 'a'.repeat(64); });
+      await assertDenied('wrong-session', async ({ env }) => { env.OMX_SESSION_ID = 'wrong-binding-session'; });
+      await assertDenied('wrong-cwd', async () => ({ input: inputFor('binding-native-wrong-cwd', join(cacheRoot, 'other-cwd')) }));
+      await assertDenied('token-hash', async ({ authorizationPath }) => {
+        const authorization = JSON.parse(await readFile(authorizationPath, 'utf-8')) as Record<string, string>;
+        authorization.tokenSha256 = 'a'.repeat(64);
+        await writeFile(authorizationPath, `${JSON.stringify(authorization)}\n`, { mode: 0o600 });
+      });
+      await assertDenied('signature', async ({ authorizationPath }) => {
+        const authorization = JSON.parse(await readFile(authorizationPath, 'utf-8')) as Record<string, string>;
+        authorization.signature = '0'.repeat(64);
+        await writeFile(authorizationPath, `${JSON.stringify(authorization)}\n`, { mode: 0o600 });
+      });
+      await assertDenied('expired', async ({ authorizationPath, authorization }) => {
+        authorization.issuedAt = new Date(Date.now() - NATIVE_LAUNCH_AUTHORIZATION_TTL_MS - 1_000).toISOString();
+        authorization.expiresAt = new Date(Date.now() - 1_000).toISOString();
+        authorization.signature = signNativeLaunchAuthorization(authorization as never)!;
+        await writeFile(authorizationPath, `${JSON.stringify(authorization)}\n`, { mode: 0o600 });
+      });
     });
   });
 

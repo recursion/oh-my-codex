@@ -63,6 +63,35 @@ export function parseCodex01445AdaptedRoleIntentCommand(
   return match?.[1] ? { role: match[1] } : null;
 }
 
+/**
+ * Recognize only the canonical acknowledgement command that creates an
+ * authenticated adapted-provenance policy. It has no shell syntax, accepts
+ * only a repository plan path, and deliberately rejects reordered, wrapped,
+ * or duplicate options.
+ */
+export function isCodex01445AdaptedProvenanceGrantCommand(command: string): boolean {
+  const parts = command.split(' ');
+  if (parts.length < 8
+    || parts[0] !== 'omx' || parts[1] !== 'ralplan' || parts[2] !== 'adapted-provenance' || parts[3] !== 'grant'
+    || parts[4] !== '--plan' || !/^docs\/plans\/[A-Za-z0-9._/-]{1,240}$/.test(parts[5] ?? '')
+    || parts[6] !== '--acknowledge' || parts[7] !== 'I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE') return false;
+  let seenTtl = false;
+  let seenJson = false;
+  for (let index = 8; index < parts.length; index += 1) {
+    if (parts[index] === '--json' && !seenJson) {
+      seenJson = true;
+      continue;
+    }
+    if (parts[index] === '--ttl-ms' && !seenTtl && /^[1-9][0-9]{0,9}$/.test(parts[index + 1] ?? '')) {
+      seenTtl = true;
+      index += 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 export function evaluateCodex01445PreToolUse(
   payload: Record<string, unknown>,
   overrides: Partial<Codex01445PreToolUseDependencies> = {},

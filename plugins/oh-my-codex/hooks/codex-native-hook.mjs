@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { extname } from 'node:path';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const hookDir = dirname(fileURLToPath(import.meta.url));
@@ -13,6 +13,17 @@ const OMX_PLUGIN_HOOK_LAUNCHER_CONTRACT_MARKER = 'omx-plugin-hook-launcher:v1';
 const MAX_WRAPPER_STDIN_BYTES = 1024 * 1024;
 const RAW_EVENT_SCAN_BYTES = 64 * 1024;
 const MAX_STOP_STDOUT_BYTES = 1024 * 1024;
+const OMX_CODEX_LAUNCH_TOKEN_ENV = 'OMX_CODEX_LAUNCH_TOKEN';
+const NATIVE_LAUNCH_AUTHORIZATION_TTL_MS = 4 * 60 * 60_000;
+const SAFE_LAUNCH_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const SAFE_AUTHORIZATION_ID = /^[a-f0-9-]{36}$/;
+const SAFE_LAUNCH_TOKEN = /^[a-f0-9]{64}$/;
+const HEX_SHA256 = /^[a-f0-9]{64}$/;
+const NATIVE_ANCHOR_AUTH_ROOT_DIR = 'native-anchor-auth';
+const NATIVE_ANCHOR_AUTH_ROOT_VERSION = 'v1';
+const NATIVE_LAUNCH_AUTHORIZATION_DIR = 'launch-authorizations';
+const NATIVE_LAUNCH_CLAIM_DIR = 'launch-claims';
 const CODEX_HOOK_EVENT_NAMES = new Set([
   'SessionStart',
   'PreToolUse',
@@ -146,12 +157,49 @@ function sanitizeLaunchId(value) {
   return String(value ?? '').trim().replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128);
 }
 
-function resolveLaunchClaimPath(payload, launchId) {
-  const cwd = typeof payload.cwd === 'string' && payload.cwd.trim() ? payload.cwd : process.cwd();
-  const stateRoot = typeof process.env.OMX_ROOT === 'string' && process.env.OMX_ROOT.trim()
-    ? process.env.OMX_ROOT.trim()
-    : join(cwd, '.omx');
-  return join(stateRoot, 'state', 'plugin-hook-launches', `${sanitizeLaunchId(launchId)}.json`);
+function nativeAnchorAuthRoot() {
+  try {
+    // Unlike os.homedir(), userInfo().homedir is not selected by HOME or a
+    // Codex launch environment. The installed plugin must share the issuer's
+    // stable per-user anchor rather than a launch-selected runtime root.
+    const home = userInfo().homedir;
+    return home ? join(home, '.omx', NATIVE_ANCHOR_AUTH_ROOT_DIR, NATIVE_ANCHOR_AUTH_ROOT_VERSION) : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPrivateDirectory(path) {
+  try {
+    const info = lstatSync(path);
+    return info.isDirectory() && !info.isSymbolicLink()
+      && (process.platform === 'win32' || (info.mode & 0o077) === 0);
+  } catch {
+    return false;
+  }
+}
+
+function ensurePrivateDirectory(path) {
+  try {
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(path, 0o700);
+    return isPrivateDirectory(path);
+  } catch {
+    return false;
+  }
+}
+
+function resolveLaunchArtifactPath(directory, launchId) {
+  const root = nativeAnchorAuthRoot();
+  return root ? join(root, directory, `${sanitizeLaunchId(launchId)}.json`) : null;
+}
+
+function resolveLaunchAuthorizationPath(launchId) {
+  return resolveLaunchArtifactPath(NATIVE_LAUNCH_AUTHORIZATION_DIR, launchId);
+}
+
+function resolveLaunchClaimPath(launchId) {
+  return resolveLaunchArtifactPath(NATIVE_LAUNCH_CLAIM_DIR, launchId);
 }
 
 function hookPayloadSessionId(input, payload) {
@@ -163,30 +211,107 @@ function hookPayloadSessionId(input, payload) {
     : '';
 }
 
-function readOrCreateNativeAnchorKey() {
-  const codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
-  const keyPath = join(codexHome, '.omx', 'native-anchor-auth.key');
+function readNativeAnchorKey() {
+  const root = nativeAnchorAuthRoot();
+  if (!root || !isPrivateDirectory(root)) return null;
+  const keyPath = join(root, 'key');
   try {
-    if (existsSync(keyPath)) {
-      const key = readFileSync(keyPath);
-      return key.length === 32 ? key : null;
-    }
-    mkdirSync(dirname(keyPath), { recursive: true });
-    const key = randomBytes(32);
-    writeFileSync(keyPath, key, { mode: 0o600, flag: 'wx' });
-    return key;
+    const info = lstatSync(keyPath);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size !== 32
+      || (process.platform !== 'win32' && (info.mode & 0o077) !== 0)) return null;
+    const key = readFileSync(keyPath);
+    return key.length === 32 ? key : null;
   } catch {
+    return null;
+  }
+}
+
+function signNativeLaunchAuthorization(key, authorization) {
+  return createHmac('sha256', key).update([
+    'native-launch-authorization-v1',
+    authorization.authorizationId,
+    authorization.launchId,
+    authorization.tokenSha256,
+    authorization.sessionId,
+    authorization.originCwd,
+    authorization.issuedAt,
+    authorization.expiresAt,
+  ].join('\0')).digest('hex');
+}
+
+function signNativeLaunchClaim(key, authorization, nativeSessionId) {
+  return createHmac('sha256', key).update([
+    'native-launch-claim-v2',
+    authorization.authorizationId,
+    authorization.launchId,
+    authorization.tokenSha256,
+    authorization.sessionId,
+    authorization.originCwd,
+    authorization.issuedAt,
+    authorization.expiresAt,
+    nativeSessionId,
+  ].join('\0')).digest('hex');
+}
+
+function safeEqualHex(actual, expected) {
+  if (!HEX_SHA256.test(actual) || !HEX_SHA256.test(expected)) return false;
+  return timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'));
+}
+
+function canonicalizeOriginCwd(cwd) {
+  const raw = typeof cwd === 'string' ? cwd.trim() : '';
+  if (!raw) return null;
+  let current;
+  try {
+    current = resolve(raw);
+  } catch {
+    return null;
+  }
+  const suffix = [];
+  for (;;) {
     try {
-      const key = readFileSync(keyPath);
-      return key.length === 32 ? key : null;
-    } catch {
-      return null;
+      const real = realpathSync(current);
+      return suffix.length ? join(real, ...suffix) : real;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') return null;
+      const parent = dirname(current);
+      if (parent === current) return current;
+      suffix.unshift(basename(current));
+      current = parent;
     }
   }
 }
 
-function signLaunchClaim(key, launchId, sessionId) {
-  return createHmac('sha256', key).update(['launch-claim-v1', launchId, sessionId].join('\0')).digest('hex');
+function readNativeLaunchAuthorization(payload, launchId, token, canonicalSessionId) {
+  const path = resolveLaunchAuthorizationPath(launchId);
+  const key = readNativeAnchorKey();
+  const cwd = typeof payload.cwd === 'string' && payload.cwd.trim() ? payload.cwd : process.cwd();
+  try {
+    if (!path || !isPrivateDirectory(dirname(path))) return null;
+    const info = lstatSync(path);
+    if (!key || !info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size <= 0 || info.size > 4096
+      || (process.platform !== 'win32' && (info.mode & 0o077) !== 0)) return null;
+    const authorization = JSON.parse(readFileSync(path, 'utf8'));
+    const stringFields = ['authorizationId', 'launchId', 'tokenSha256', 'sessionId', 'originCwd', 'issuedAt', 'expiresAt', 'signature'];
+    if (!authorization || authorization.schema_version !== 1
+      || stringFields.some((field) => typeof authorization[field] !== 'string')) return null;
+    const normalized = Object.fromEntries(stringFields.map((field) => [field, authorization[field].trim()]));
+    if (!SAFE_AUTHORIZATION_ID.test(normalized.authorizationId) || !SAFE_LAUNCH_ID.test(normalized.launchId)
+      || !HEX_SHA256.test(normalized.tokenSha256) || !SAFE_SESSION_ID.test(normalized.sessionId)
+      || !normalized.originCwd || !HEX_SHA256.test(normalized.signature)
+      || normalized.launchId !== launchId || normalized.sessionId !== canonicalSessionId
+      || normalized.originCwd !== canonicalizeOriginCwd(cwd)
+      || normalized.tokenSha256 !== createHash('sha256').update(token).digest('hex')) return null;
+    const issuedAtMs = Date.parse(normalized.issuedAt);
+    const expiresAtMs = Date.parse(normalized.expiresAt);
+    const nowMs = Date.now();
+    if (!Number.isFinite(issuedAtMs) || !Number.isFinite(expiresAtMs) || issuedAtMs > nowMs || expiresAtMs <= nowMs
+      || expiresAtMs - issuedAtMs > NATIVE_LAUNCH_AUTHORIZATION_TTL_MS) return null;
+    const expectedSignature = signNativeLaunchAuthorization(key, normalized);
+    return safeEqualHex(normalized.signature, expectedSignature) ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
 function isClaimedChildSessionStart(payload, claimedLeaderSessionId) {
@@ -220,23 +345,37 @@ function isClaimedChildSessionStart(payload, claimedLeaderSessionId) {
 function isOmxLauncherSession(input, payload) {
   const launchId = process.env.OMX_CODEX_LAUNCH_ID?.trim();
   const entryPath = process.env.OMX_ENTRY_PATH?.trim();
+  const token = process.env[OMX_CODEX_LAUNCH_TOKEN_ENV]?.trim();
+  const canonicalSessionId = process.env.OMX_SESSION_ID?.trim();
   const sessionId = hookPayloadSessionId(input, payload);
-  if (!launchId || !entryPath || !sessionId) return false;
+  if (!entryPath || !SAFE_LAUNCH_ID.test(launchId ?? '') || !SAFE_LAUNCH_TOKEN.test(token ?? '')
+    || !SAFE_SESSION_ID.test(canonicalSessionId ?? '') || !sessionId) return false;
 
-  const claimPath = resolveLaunchClaimPath(payload, launchId);
+  const authorization = readNativeLaunchAuthorization(payload, launchId, token, canonicalSessionId);
+  if (!authorization) return false;
+  const claimPath = resolveLaunchClaimPath(launchId);
 
   try {
-    const key = readOrCreateNativeAnchorKey();
-    if (!key) return false;
+    const key = readNativeAnchorKey();
+    if (!key || !claimPath) return false;
     if (existsSync(claimPath)) {
+      if (!isPrivateDirectory(dirname(claimPath))) return false;
+      const info = lstatSync(claimPath);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size <= 0 || info.size > 4096
+        || (process.platform !== 'win32' && (info.mode & 0o077) !== 0)) return false;
       const claimed = JSON.parse(readFileSync(claimPath, 'utf8'));
-      const claimedSignature = typeof claimed?.sessionId === 'string' ? signLaunchClaim(key, launchId, claimed.sessionId) : '';
-      return claimed?.signature === claimedSignature
-        && (claimed.sessionId === sessionId || isClaimedChildSessionStart(payload, claimed.sessionId));
+      const claimedSessionId = typeof claimed?.nativeSessionId === 'string' ? claimed.nativeSessionId.trim() : '';
+      const claimedSignature = typeof claimed?.signature === 'string'
+        ? signNativeLaunchClaim(key, authorization, claimedSessionId)
+        : '';
+      return claimed?.schema_version === 1 && safeEqualHex(String(claimed?.signature ?? ''), claimedSignature)
+        && (claimedSessionId === sessionId || isClaimedChildSessionStart(payload, claimedSessionId));
     }
-    const signature = signLaunchClaim(key, launchId, sessionId);
-    mkdirSync(dirname(claimPath), { recursive: true });
-    writeFileSync(claimPath, `${JSON.stringify({ sessionId, signature })}\n`, { encoding: 'utf8', mode: 0o600 });
+    const signature = signNativeLaunchClaim(key, authorization, sessionId);
+    if (!ensurePrivateDirectory(dirname(claimPath))) return false;
+    writeFileSync(claimPath, `${JSON.stringify({ schema_version: 1, nativeSessionId: sessionId, signature })}\n`, {
+      encoding: 'utf8', mode: 0o600, flag: 'wx',
+    });
     return true;
   } catch {
     return false;

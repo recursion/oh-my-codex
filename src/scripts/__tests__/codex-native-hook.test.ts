@@ -12,7 +12,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { buildManagedCodexHooksConfig } from "../../config/codex-hooks.js";
@@ -598,6 +598,10 @@ const priorTeamEnv = new Map<
 	(typeof TEAM_ENV_KEYS)[number],
 	string | undefined
 >();
+const originalTestPath = process.env.PATH;
+const deterministicTestPath = [dirname(process.execPath), "/usr/bin", "/bin"].join(
+	delimiter,
+);
 
 beforeEach(() => {
 	priorTeamEnv.clear();
@@ -605,6 +609,7 @@ beforeEach(() => {
 		priorTeamEnv.set(key, process.env[key]);
 		delete process.env[key];
 	}
+	process.env.PATH = deterministicTestPath;
 });
 
 afterEach(() => {
@@ -614,6 +619,8 @@ afterEach(() => {
 		else delete process.env[key];
 	}
 	priorTeamEnv.clear();
+	if (originalTestPath === undefined) delete process.env.PATH;
+	else process.env.PATH = originalTestPath;
 });
 
 describe("codex native hook config", () => {
@@ -4913,7 +4920,7 @@ PY`,
     }
   });
 
-  it("keeps a self-parented native role thread as subagent evidence", async () => {
+  it("fails closed without creating tracker evidence for a self-parented native role thread", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-self-parented-subagent-"));
     try {
       const stateDir = join(cwd, ".omx", "state");
@@ -4957,17 +4964,10 @@ PY`,
         { cwd, sessionOwnerPid: process.pid },
       );
 
-      const tracking = JSON.parse(
-        await readFile(join(stateDir, "subagent-tracking.json"), "utf-8"),
-      ) as {
-        sessions?: Record<string, {
-          leader_thread_id?: string;
-          threads?: Record<string, { kind?: string; mode?: string }>;
-        }>;
-      };
-      assert.equal(tracking.sessions?.[canonicalSessionId]?.leader_thread_id, undefined);
-      assert.equal(tracking.sessions?.[canonicalSessionId]?.threads?.[nativeRoleThreadId]?.kind, "subagent");
-      assert.equal(tracking.sessions?.[canonicalSessionId]?.threads?.[nativeRoleThreadId]?.mode, "architect");
+      await assert.rejects(
+        readFile(join(stateDir, "subagent-tracking.json"), "utf-8"),
+        { code: "ENOENT" },
+      );
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

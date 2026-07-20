@@ -1,44 +1,112 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
+import { afterEach, describe, it } from 'node:test';
 
 import { ralplanCommand } from '../ralplan.js';
 import { resolveRuntimeStateScope } from '../../mcp/state-paths.js';
+import { issueAdaptedProvenancePolicy } from '../../ralplan/adapted-provenance-policy.js';
 import { dispatchCodexNativeHook } from '../../scripts/codex-native-hook.js';
-import { signNativeLaunchClaim } from '../../subagents/native-anchor-auth.js';
+import {
+  __setNativeAnchorAuthRootForTest,
+  issueNativeLaunchAuthorization,
+  nativeLaunchClaimPath,
+  OMX_CODEX_LAUNCH_TOKEN_ENV,
+  signNativeLaunchClaim,
+} from '../../subagents/native-anchor-auth.js';
 import { hasVerifiedLeaderAttestation, readSubagentTrackingState } from '../../subagents/tracker.js';
 
-const ROLE_COMMAND = 'omx ralplan role-intent write --role architect --parent-thread "$CODEX_THREAD_ID" --json';
+const ROLE_COMMAND = 'omx ralplan role-intent write --role planner --parent-thread "$CODEX_THREAD_ID" --json';
+const GRANT_COMMAND = 'omx ralplan adapted-provenance grant --plan docs/plans/parked/candidate.md --acknowledge I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE --json';
 const TEST_CODEX_HOME = join(tmpdir(), 'omx-3212-shared-codex-home');
+const launchContexts = new Map<string, { canonical: string; token: string }>();
+
+function launchContextKey(cwd: string, launchId: string): string {
+  return `${cwd}\0${launchId}`;
+}
 
 function payload(cwd: string, nativeSessionId: string, overrides: Record<string, unknown> = {}) {
   return { hook_event_name: 'PreToolUse', cwd, session_id: nativeSessionId, tool_name: 'Bash', tool_use_id: 'synthetic-tool-use', tool_input: { command: ROLE_COMMAND }, ...overrides };
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
-  await mkdir(join(path, '..'), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value)}\n`);
+  const parent = join(path, '..');
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  await chmod(parent, 0o700);
+  await writeFile(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
 }
 
 async function prepareLaunch(cwd: string, canonical: string, native: string, launchId = 'launch-3212'): Promise<void> {
   const codexHome = TEST_CODEX_HOME;
+  const anchorRoot = join(cwd, '.native-anchor');
+  const token = 'a'.repeat(64);
   process.env.CODEX_HOME = codexHome;
-  await mkdir(join(codexHome, '.omx'), { recursive: true });
-  await writeFile(join(codexHome, '.omx', 'native-anchor-auth.key'), Buffer.alloc(32, 7));
-  const signature = signNativeLaunchClaim(launchId, native, { ...process.env, CODEX_HOME: codexHome });
+  __setNativeAnchorAuthRootForTest(anchorRoot);
+  await mkdir(anchorRoot, { recursive: true, mode: 0o700 });
+  await chmod(anchorRoot, 0o700);
+  await writeFile(join(anchorRoot, 'key'), Buffer.alloc(32, 7), { mode: 0o600 });
+  await chmod(join(anchorRoot, 'key'), 0o600);
+  const launchEnv = {
+    ...process.env,
+    CODEX_HOME: codexHome,
+    OMX_ENTRY_PATH: join(process.cwd(), 'dist', 'cli', 'omx.js'),
+    OMX_CODEX_LAUNCH_ID: launchId,
+    [OMX_CODEX_LAUNCH_TOKEN_ENV]: token,
+    OMX_SESSION_ID: canonical,
+  };
+  const authorization = issueNativeLaunchAuthorization({ cwd, sessionId: canonical, launchId, token, env: launchEnv });
+  assert.ok(authorization);
+  const signature = signNativeLaunchClaim({ ...authorization, nativeSessionId: native });
+  assert.ok(signature);
   await writeJson(join(cwd, '.omx', 'state', 'session.json'), { session_id: canonical, native_session_id: native, cwd });
-  await writeJson(join(cwd, '.omx', 'state', 'plugin-hook-launches', `${launchId}.json`), { sessionId: native, signature });
+  const claimPath = nativeLaunchClaimPath(cwd, launchId);
+  assert.ok(claimPath);
+  await writeJson(claimPath, { schema_version: 1, nativeSessionId: native, signature });
+  launchContexts.set(launchContextKey(cwd, launchId), { canonical, token });
+}
+
+async function declareAmendedPlan(cwd: string): Promise<void> {
+  await mkdir(join(cwd, 'docs', 'plans', 'parked'), { recursive: true });
+  await writeFile(join(cwd, 'docs', 'plans', 'parked', 'candidate.md'), '<!-- OMX:AUTHENTICATED-ADAPTED-PROVENANCE scope="test.ralplan.bootstrap.v1" -->\n');
+}
+
+function grantAmendedPolicy(cwd: string, sessionId: string): void {
+  const result = issueAdaptedProvenancePolicy({
+    cwd,
+    sessionId,
+    planPath: 'docs/plans/parked/candidate.md',
+    acknowledgement: 'I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE',
+    ttlMs: 60_000,
+  });
+  assert.equal(result.ok, true);
 }
 
 async function withLaunchEnv<T>(cwd: string, launchId: string, run: () => Promise<T>): Promise<T> {
-  const previous = { CODEX_HOME: process.env.CODEX_HOME, OMX_ROOT: process.env.OMX_ROOT, OMX_ENTRY_PATH: process.env.OMX_ENTRY_PATH, OMX_CODEX_LAUNCH_ID: process.env.OMX_CODEX_LAUNCH_ID };
-  delete process.env.OMX_ROOT;
+  const previous = {
+    CODEX_HOME: process.env.CODEX_HOME,
+    OMX_ROOT: process.env.OMX_ROOT,
+    OMX_STATE_ROOT: process.env.OMX_STATE_ROOT,
+    OMX_TEAM_STATE_ROOT: process.env.OMX_TEAM_STATE_ROOT,
+    OMX_SESSION_ID: process.env.OMX_SESSION_ID,
+    CODEX_SESSION_ID: process.env.CODEX_SESSION_ID,
+    SESSION_ID: process.env.SESSION_ID,
+    OMX_TEAM_NAME: process.env.OMX_TEAM_NAME,
+    OMX_TEAM_WORKER_ID: process.env.OMX_TEAM_WORKER_ID,
+    OMX_ENTRY_PATH: process.env.OMX_ENTRY_PATH,
+    OMX_CODEX_LAUNCH_ID: process.env.OMX_CODEX_LAUNCH_ID,
+    [OMX_CODEX_LAUNCH_TOKEN_ENV]: process.env[OMX_CODEX_LAUNCH_TOKEN_ENV],
+  };
+  for (const key of Object.keys(previous)) delete process.env[key];
   process.env.CODEX_HOME = TEST_CODEX_HOME;
   process.env.OMX_ENTRY_PATH = join(process.cwd(), 'dist', 'cli', 'omx.js');
   process.env.OMX_CODEX_LAUNCH_ID = launchId;
+  const context = launchContexts.get(launchContextKey(cwd, launchId));
+  if (context) {
+    process.env.OMX_SESSION_ID = context.canonical;
+    process.env[OMX_CODEX_LAUNCH_TOKEN_ENV] = context.token;
+  }
   try { return await run(); } finally {
     for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
   }
@@ -50,6 +118,10 @@ function denialReason(result: Awaited<ReturnType<typeof dispatchCodexNativeHook>
 
 
 describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: false }, () => {
+  afterEach(() => {
+    __setNativeAnchorAuthRootForTest();
+    process.exitCode = undefined;
+  });
   it('supports SessionStart pointer then no-thread PreToolUse and records one idempotent intent', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-3212-positive-'));
     const canonical = 'omx-canonical-3212';
@@ -57,11 +129,13 @@ describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: fa
     const launchId = 'launch-positive-3212';
     try {
       await prepareLaunch(cwd, canonical, native, launchId);
+      await declareAmendedPlan(cwd);
       const rootTranscript = join(cwd, 'root-transcript.jsonl');
-      await writeJson(rootTranscript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex_exec', source: 'exec', thread_source: 'user' } });
+      await writeJson(rootTranscript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex', source: 'interactive', thread_source: 'user' } });
       await withLaunchEnv(cwd, launchId, async () => {
         assert.equal((await dispatchCodexNativeHook(payload(cwd, native, { transcript_path: rootTranscript }), { cwd })).outputJson, null);
         assert.equal((await dispatchCodexNativeHook(payload(cwd, native, { transcript_path: rootTranscript }), { cwd })).outputJson, null);
+        grantAmendedPolicy(cwd, canonical);
       });
       const tracker = JSON.parse(await readFile(join(cwd, '.omx', 'state', 'subagent-tracking.json'), 'utf8'));
       assert.equal(tracker.sessions[canonical].leader_thread_id, native);
@@ -70,7 +144,7 @@ describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: fa
       const normalizedTracker = await readSubagentTrackingState(cwd);
       assert.equal(hasVerifiedLeaderAttestation(canonical, normalizedTracker.sessions[canonical]), true);
       const receipts: string[] = [];
-      const invoke = () => ralplanCommand(['role-intent', 'write', '--role', 'architect', '--parent-thread', native, '--session', canonical, '--json'], {
+      const invoke = () => ralplanCommand(['role-intent', 'write', '--role', 'planner', '--parent-thread', native, '--session', canonical, '--json'], {
         cwd: () => cwd,
         stdout: (line) => receipts.push(line),
         generateCorrelationToken: () => 'a'.repeat(32),
@@ -81,7 +155,7 @@ describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: fa
           return scope;
         },
       });
-      await invoke(); await invoke();
+      await withLaunchEnv(cwd, launchId, async () => { await invoke(); await invoke(); });
       const updated = JSON.parse(await readFile(join(cwd, '.omx', 'state', 'subagent-tracking.json'), 'utf8'));
       assert.equal(updated.pending_role_intents.length, 1);
       assert.deepEqual(JSON.parse(receipts[1]!), JSON.parse(receipts[0]!));
@@ -181,6 +255,150 @@ describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: fa
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
+  it('authenticates the exact interactive grant command before the CLI may issue a policy', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-3212-grant-root-'));
+    const canonical = 'omx-grant-root-3212';
+    const native = 'native-grant-root-3212';
+    const launchId = 'launch-grant-root-3212';
+    const grantArgs = [
+      'adapted-provenance', 'grant',
+      '--plan', 'docs/plans/parked/candidate.md',
+      '--acknowledge', 'I_ACCEPT_AUTHENTICATED_ADAPTED_PROVENANCE',
+      '--json',
+    ];
+    try {
+      await prepareLaunch(cwd, canonical, native, launchId);
+      await declareAmendedPlan(cwd);
+      const beforeAttestation: string[] = [];
+      await withLaunchEnv(cwd, launchId, () => ralplanCommand(grantArgs, {
+        cwd: () => cwd,
+        stdout: (line) => beforeAttestation.push(line),
+      }));
+      assert.deepEqual(JSON.parse(beforeAttestation[0]!), { ok: false, reason: 'native_anchor_unavailable' });
+      process.exitCode = undefined;
+
+      const rootTranscript = join(cwd, 'grant-root-transcript.jsonl');
+      await writeJson(rootTranscript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex', source: 'interactive', thread_source: 'user' } });
+      await withLaunchEnv(cwd, launchId, async () => {
+        const hook = await dispatchCodexNativeHook(payload(cwd, native, {
+          transcript_path: rootTranscript,
+          tool_input: { command: GRANT_COMMAND },
+        }), { cwd });
+        assert.equal(hook.outputJson, null);
+      });
+      const tracking = await readSubagentTrackingState(cwd);
+      assert.equal(hasVerifiedLeaderAttestation(canonical, tracking.sessions[canonical]), true);
+
+      const afterAttestation: string[] = [];
+      await withLaunchEnv(cwd, launchId, () => ralplanCommand(grantArgs, {
+        cwd: () => cwd,
+        stdout: (line) => afterAttestation.push(line),
+      }));
+      assert.equal(JSON.parse(afterAttestation[0]!).ok, true);
+      process.exitCode = undefined;
+
+      const unrelatedLauncher: string[] = [];
+      await withLaunchEnv(cwd, 'unrelated-launch-3212', () => ralplanCommand(grantArgs, {
+        cwd: () => cwd,
+        stdout: (line) => unrelatedLauncher.push(line),
+      }));
+      assert.deepEqual(JSON.parse(unrelatedLauncher[0]!), { ok: false, reason: 'native_anchor_unavailable' });
+      process.exitCode = undefined;
+
+      const replayedAuthorization: string[] = [];
+      await withLaunchEnv(cwd, launchId, () => ralplanCommand(grantArgs, {
+        cwd: () => cwd,
+        stdout: (line) => replayedAuthorization.push(line),
+      }));
+      assert.deepEqual(JSON.parse(replayedAuthorization[0]!), { ok: false, reason: 'native_anchor_unavailable' });
+      process.exitCode = undefined;
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  for (const scenario of [
+    { name: 'codex_exec', transcript: { originator: 'codex_exec', source: 'exec', thread_source: 'user' }, teamWorker: false },
+    { name: 'Team worker', transcript: { originator: 'codex', source: 'interactive', thread_source: 'user' }, teamWorker: true },
+  ]) it(`rejects the exact adapted grant command from ${scenario.name} provenance`, async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-3212-grant-denied-'));
+    const canonical = `omx-grant-denied-${scenario.name.replace(/[^a-z]/gi, '')}`;
+    const native = `native-grant-denied-${scenario.name.replace(/[^a-z]/gi, '')}`;
+    const launchId = `launch-grant-denied-${scenario.name.replace(/[^a-z]/gi, '')}`;
+    const previous = { OMX_TEAM_WORKER: process.env.OMX_TEAM_WORKER, OMX_TEAM_INTERNAL_WORKER: process.env.OMX_TEAM_INTERNAL_WORKER };
+    try {
+      await prepareLaunch(cwd, canonical, native, launchId);
+      await declareAmendedPlan(cwd);
+      const transcript = join(cwd, 'grant-denied-transcript.jsonl');
+      await writeJson(transcript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, ...scenario.transcript } });
+      if (scenario.teamWorker) process.env.OMX_TEAM_WORKER = 'worker-1';
+      const result = await withLaunchEnv(cwd, launchId, () => dispatchCodexNativeHook(payload(cwd, native, {
+        transcript_path: transcript,
+        tool_input: { command: GRANT_COMMAND },
+      }), { cwd }));
+      assert.match(String(denialReason(result)), /unsupported_documented_leader_proof/);
+      assert.equal(existsSync(join(cwd, '.omx', 'state', 'subagent-tracking.json')), false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  for (const scenario of [
+    { name: 'environment wrapper around grant', command: `env SAFE=1 ${GRANT_COMMAND}` },
+    { name: 'command wrapper around role intent', command: `command ${ROLE_COMMAND}` },
+    { name: 'nested shell grant', command: `sh -c '${GRANT_COMMAND}'` },
+    { name: 'Node entrypoint role intent with equals syntax', command: 'node dist/cli/omx.js ralplan role-intent write --role=planner --parent-thread=native-placeholder --json' },
+  ]) it(`rejects ${scenario.name} instead of silently bypassing adapted provenance authentication`, async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-3212-wrapped-adapted-'));
+    const canonical = `omx-wrapped-${scenario.name.replace(/[^a-z]/gi, '')}`;
+    const native = `native-wrapped-${scenario.name.replace(/[^a-z]/gi, '')}`;
+    const launchId = `launch-wrapped-${scenario.name.replace(/[^a-z]/gi, '')}`;
+    try {
+      await prepareLaunch(cwd, canonical, native, launchId);
+      await declareAmendedPlan(cwd);
+      const transcript = join(cwd, 'wrapped-root-transcript.jsonl');
+      await writeJson(transcript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex', source: 'interactive', thread_source: 'user' } });
+      const result = await withLaunchEnv(cwd, launchId, () => dispatchCodexNativeHook(payload(cwd, native, {
+        transcript_path: transcript,
+        tool_input: { command: scenario.command },
+      }), { cwd }));
+      assert.match(String(denialReason(result)), /unsupported_documented_leader_proof/);
+      assert.equal(existsSync(join(cwd, '.omx', 'state', 'subagent-tracking.json')), false);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('rejects the exact adapted role-intent command from codex_exec provenance', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-3212-codex-exec-'));
+    const canonical = 'omx-codex-exec-3212';
+    const native = 'native-codex-exec-3212';
+    try {
+      await prepareLaunch(cwd, canonical, native);
+      const transcript = join(cwd, 'codex-exec.jsonl');
+      await writeJson(transcript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex_exec', source: 'exec', thread_source: 'user' } });
+      const result = await withLaunchEnv(cwd, 'launch-3212', () => dispatchCodexNativeHook(payload(cwd, native, { transcript_path: transcript }), { cwd }));
+      assert.match(String(denialReason(result)), /unsupported_documented_leader_proof/);
+      assert.equal(existsSync(join(cwd, '.omx', 'state', 'subagent-tracking.json')), false);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('rejects the exact adapted role-intent command from a Team worker', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-3212-team-worker-'));
+    const canonical = 'omx-team-worker-3212';
+    const native = 'native-team-worker-3212';
+    const previous = { OMX_TEAM_WORKER: process.env.OMX_TEAM_WORKER, OMX_TEAM_INTERNAL_WORKER: process.env.OMX_TEAM_INTERNAL_WORKER };
+    try {
+      await prepareLaunch(cwd, canonical, native);
+      const transcript = join(cwd, 'team-worker.jsonl');
+      await writeJson(transcript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex', source: 'interactive', thread_source: 'user' } });
+      process.env.OMX_TEAM_WORKER = 'worker-1';
+      const result = await withLaunchEnv(cwd, 'launch-3212', () => dispatchCodexNativeHook(payload(cwd, native, { transcript_path: transcript }), { cwd }));
+      assert.match(String(denialReason(result)), /unsupported_documented_leader_proof/);
+      assert.equal(existsSync(join(cwd, '.omx', 'state', 'subagent-tracking.json')), false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('records authenticated intents for project-local custom roles', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-3212-custom-role-'));
     const canonical = 'omx-custom-role-3212';
@@ -190,7 +408,7 @@ describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: fa
       await mkdir(join(cwd, '.codex', 'agents'), { recursive: true });
       await writeFile(join(cwd, '.codex', 'agents', 'custom-reviewer.toml'), 'name = "custom-reviewer"\n');
       const rootTranscript = join(cwd, 'custom-root-transcript.jsonl');
-      await writeJson(rootTranscript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex_exec', source: 'exec', thread_source: 'user' } });
+      await writeJson(rootTranscript, { type: 'session_meta', payload: { id: native, session_id: native, cwd, originator: 'codex', source: 'interactive', thread_source: 'user' } });
       await withLaunchEnv(cwd, 'launch-3212', async () => {
         assert.equal((await dispatchCodexNativeHook(payload(cwd, native, {
           tool_input: { command: 'omx ralplan role-intent write --role custom-reviewer --parent-thread "$CODEX_THREAD_ID" --json' },
@@ -198,7 +416,7 @@ describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: fa
         }), { cwd })).outputJson, null);
       });
       const stdout: string[] = [];
-      await ralplanCommand(['role-intent', 'write', '--role', 'custom-reviewer', '--parent-thread', native, '--session', canonical, '--json'], {
+      await withLaunchEnv(cwd, 'launch-3212', () => ralplanCommand(['role-intent', 'write', '--role', 'custom-reviewer', '--parent-thread', native, '--session', canonical, '--json'], {
         cwd: () => cwd,
         stdout: (line) => stdout.push(line),
         generateCorrelationToken: () => 'c'.repeat(32),
@@ -208,8 +426,8 @@ describe('#3212 authenticated Codex 0.144.5 leader bootstrap', { concurrency: fa
           delete process.env.OMX_ROOT;
           return scope;
         },
-      });
-      assert.equal(JSON.parse(stdout[0]!).intent.role, 'custom-reviewer');
+      }));
+      assert.equal(JSON.parse(stdout[0]!).reason, 'adapted_provenance_policy_required');
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
