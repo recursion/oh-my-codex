@@ -283,8 +283,9 @@ async function readProjectMemorySummary(cwd: string): Promise<string> {
 function getNativeSubagentRoutingInstructions(): string {
   return [
     "When the native surface exposes `agent_type` role routing, set `agent_type` to an installed OMX role and never omit it for OMX work.",
-    "On that routing-capable surface, use the most specific role (`architect`, `code-reviewer`, `critic`, `planner`, `debugger`, etc.); use `executor` only for generic implementation work.",
-    "When it reports `role_routing_unavailable`, do not fabricate `agent_type`; never fake the role via a prompt label. Before Ralplan planning, state, HUD, runtime, or delegation work, run `omx ralplan preflight --json` and stop on `unsupported_documented_leader_proof` by default. The sole exception is a reviewed, explicitly amended plan with a current acknowledged authenticated adapted-provenance policy that passes `omx ralplan preflight --adapted-provenance --json`. Do not infer authority from session/thread/pointer/transcript/cwd state.",
+    "For `spawn_agent`, set `fork_turns` to `none`; never use `all` or a positive turn count; make the prompt self-contained.",
+    "When it reports `role_routing_unavailable`, do not fabricate `agent_type`; never fake the role via a prompt label. Before Ralplan or related state/runtime work, run `omx ralplan preflight --json` and stop on `unsupported_documented_leader_proof` by default. Only a reviewed amended plan with a current acknowledged policy passing `omx ralplan preflight --adapted-provenance --json` may proceed. Do not infer authority from ambient state.",
+    "On a routing-capable surface, use the most specific installed role; reserve `executor` for generic implementation work.",
   ].join("\n");
 }
 

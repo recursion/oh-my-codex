@@ -75,6 +75,7 @@ Leader responsibilities: choose the mode, delegate bounded verifiable subtasks, 
 Worker responsibilities: execute the assigned slice, stay inside scope, and report blockers, shared-file conflicts, scope expansion, or recommended handoffs upward; child prompts should report recommended handoffs upward rather than recursively orchestrating.
 Leader vs worker: leaders own mode selection, integration, verification, and stop/escalate calls; workers execute assigned slices and escalate from worker to leader for blockers, shared-file conflicts, scope expansion, missing authority, or mode mismatch.
 Rules: max 6 concurrent child agents; child prompts remain under AGENTS.md authority; prefer inherited model defaults unless a task has a concrete model reason; `worker` is a team-runtime surface, not a general-purpose child role.
+Native context rule: set `fork_turns="none"` and provide a self-contained prompt for every spawn. Never use `fork_turns="all"` or a positive turn count; if essential context cannot be summarized safely, keep the task in the leader.
 </child_agent_protocol>
 
 
@@ -86,6 +87,7 @@ Rules: max 6 concurrent child agents; child prompts remain under AGENTS.md autho
 
 <model_routing>
 Match role to task shape: `explore` for repo lookup, `researcher` for official docs/reference gathering, `dependency-expert` for SDK/package decisions, `executor` for implementation, `debugger` for root cause, `architect`/`critic` for high-complexity review. Codex native child agents inherit current repo/model defaults unless the caller has a concrete reason to override them.
+When a native surface reports `role_routing_unavailable`, do not fabricate `agent_type`: the adapted role path is unavailable and cannot apply the requested role TOML model or reasoning effort. Run `omx ralplan preflight --json` for Ralplan and stop on `unsupported_documented_leader_proof`; use an OMX Team worker or another role-aware launcher when exact routing is required.
 </model_routing>
 
 <specialist_routing>
