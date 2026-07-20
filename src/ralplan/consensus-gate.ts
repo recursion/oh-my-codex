@@ -117,8 +117,10 @@ export function buildRalplanConsensusGateFromSources(
       const requiresTrackerBackedLanes = options.requireNativeSubagents
         || evidence.ralplan_architect_review.provenance_kind === 'native_subagent'
         || evidence.ralplan_architect_review.provenance_kind === 'omx_adapted'
+        || evidence.ralplan_architect_review.provenance_kind === 'omx_team'
         || evidence.ralplan_critic_review.provenance_kind === 'native_subagent'
-        || evidence.ralplan_critic_review.provenance_kind === 'omx_adapted';
+        || evidence.ralplan_critic_review.provenance_kind === 'omx_adapted'
+        || evidence.ralplan_critic_review.provenance_kind === 'omx_team';
       if (requiresTrackerBackedLanes) {
         const trackerEvaluation = evaluateTrackerBackedNativeRalplanLanes(evidence, candidateOptions, trackerSnapshots);
         if (!trackerEvaluation.valid) {
@@ -247,6 +249,7 @@ export function readLocalRalplanConsensusStateCandidates(
   const paths = stateRoots.flatMap(({ dir, sessionId }) => [
     { path: join(dir, 'ralplan-state.json'), sessionId },
     { path: join(dir, 'autopilot-state.json'), sessionId },
+    { path: join(dir, 'ralplan-team-consensus.json'), sessionId },
   ]);
 
   return paths.flatMap(({ path, sessionId }) => {
@@ -614,7 +617,7 @@ function isCriticNotBeforeArchitect(
 }
 
 function isTrackerBackedReview(review: Record<string, unknown>): boolean {
-  return review.provenance_kind === 'native_subagent' || review.provenance_kind === 'omx_adapted';
+  return review.provenance_kind === 'native_subagent' || review.provenance_kind === 'omx_adapted' || review.provenance_kind === 'omx_team';
 }
 
 function reviewOrderValue(review: Record<string, unknown>): ReviewOrder | null {
@@ -814,6 +817,14 @@ function trackerBackedNativeReviewPairProblem(
   if (architectThreadId && criticThreadId && architectThreadId === criticThreadId) {
     return 'architect and critic reviews must reference distinct native subagent tracker threads';
   }
+  if (evidence.ralplan_architect_review?.provenance_kind === 'omx_team'
+    || evidence.ralplan_critic_review?.provenance_kind === 'omx_team') {
+    const architectDigest = String(evidence.ralplan_architect_review?.input_digest ?? '');
+    const criticDigest = String(evidence.ralplan_critic_review?.input_digest ?? '');
+    if (!/^[a-f0-9]{64}$/.test(architectDigest) || architectDigest !== criticDigest) {
+      return 'OMX Team reviews must bind the same valid planning input digest';
+    }
+  }
 
   const transitionSessionId = typeof options.sessionId === 'string' ? options.sessionId.trim() : '';
   const architectSessionId = transitionSessionId || nativeReviewSessionId(evidence.ralplan_architect_review);
@@ -822,12 +833,16 @@ function trackerBackedNativeReviewPairProblem(
   if (architectSessionId !== criticSessionId) {
     return `architect and critic reviews must resolve to the same native subagent tracker session; architect session_id=${architectSessionId}, critic session_id=${criticSessionId}`;
   }
+  const laneLabel = evidence.ralplan_architect_review?.provenance_kind === 'omx_team'
+    && evidence.ralplan_critic_review?.provenance_kind === 'omx_team'
+    ? 'OMX Team'
+    : 'native subagent';
   return trackerBackedReviewOrderProblem(
     architectSessionId,
     architectThreadId,
     criticThreadId,
     snapshot,
-    'native subagent',
+    laneLabel,
   );
 }
 
@@ -878,11 +893,12 @@ function trackerBackedNativeReviewProblem(
   if (review?.provenance_kind === 'omx_adapted') {
     return `${agentRole} review uses unsupported omx_adapted provenance`;
   }
+  const provenanceKind = review?.provenance_kind === 'omx_team' ? 'omx_team' : 'native_subagent';
   return trackerBackedReviewProblem(
     review,
     agentRole,
     options,
-    'native_subagent',
+    provenanceKind,
     snapshot,
   );
 }
@@ -891,7 +907,7 @@ function trackerBackedReviewProblem(
   review: Record<string, unknown> | null,
   agentRole: 'architect' | 'critic',
   options: RalplanNativeSubagentConsensusOptions,
-  provenanceKind: 'native_subagent' | 'omx_adapted',
+  provenanceKind: 'native_subagent' | 'omx_adapted' | 'omx_team',
   snapshot: TrackerSnapshot | null,
 ): string | null {
   const issues: string[] = [];
@@ -916,7 +932,7 @@ function trackerBackedReviewProblem(
 
   if (issues.length > 0) return issues.join('; ');
   if (!snapshot) return `${agentRole} review cannot resolve tracker snapshot`;
-  return trackerThreadProblem(
+  const problem = trackerThreadProblem(
     snapshot.tracking,
     sessionId,
     threadId,
@@ -925,6 +941,14 @@ function trackerBackedReviewProblem(
     options.cwd,
     provenanceKind,
   );
+  if (problem || provenanceKind !== 'omx_team') return problem;
+  const session = asRecord(asRecord(snapshot.tracking?.sessions)?.[sessionId]);
+  const thread = asRecord(asRecord(session?.threads)?.[threadId]);
+  const digest = typeof review.input_digest === 'string' ? review.input_digest.trim() : '';
+  if (!/^[a-f0-9]{64}$/.test(digest)) return `${agentRole} OMX Team review has invalid input_digest`;
+  if (thread?.scope !== `ralplan:${digest}`) return `${agentRole} OMX Team tracker scope does not match input_digest`;
+  if (thread?.lane_id !== review.team_name) return `${agentRole} OMX Team tracker lane does not match team_name`;
+  return null;
 }
 
 
@@ -935,7 +959,7 @@ function trackerThreadProblem(
   agentRole: 'architect' | 'critic',
   trackerPath: string,
   cwd: string | undefined,
-  provenanceKind: 'native_subagent' | 'omx_adapted',
+  provenanceKind: 'native_subagent' | 'omx_adapted' | 'omx_team',
 ): string | null {
   const laneLabel = provenanceKind === 'native_subagent' ? 'native' : provenanceKind;
 
@@ -949,7 +973,8 @@ function trackerThreadProblem(
     (currentLeaderThreadId && currentLeaderThreadId === threadId)
     || (leaderThreadId && leaderThreadId === threadId && thread.kind !== 'subagent')
   ) return `${agentRole} tracker thread ${threadId} is the session leader`;
-  if (thread.kind !== 'subagent') return `${agentRole} tracker thread ${threadId} has kind=${String(thread.kind || 'missing')}`;
+  const expectedKind = provenanceKind === 'omx_team' ? 'team_worker' : 'subagent';
+  if (thread.kind !== expectedKind) return `${agentRole} tracker thread ${threadId} has kind=${String(thread.kind || 'missing')}, expected ${expectedKind}`;
   const completedAt = typeof thread.completed_at === 'string' ? thread.completed_at.trim() : '';
   if (!completedAt) return `${agentRole} tracker thread ${threadId} is not completed`;
   const ledgerProvenance = typeof thread.provenance_kind === 'string' ? thread.provenance_kind.trim() : '';
@@ -959,10 +984,13 @@ function trackerThreadProblem(
   if (provenanceKind === 'native_subagent' && ledgerProvenance && ledgerProvenance !== 'native_subagent') {
     return `${agentRole} tracker thread ${threadId} has provenance_kind=${ledgerProvenance}, conflicting with native_subagent review provenance`;
   }
+  if (provenanceKind === 'omx_team' && ledgerProvenance !== 'omx_team') {
+    return `${agentRole} tracker thread ${threadId} has provenance_kind=${ledgerProvenance || 'missing'}, expected omx_team`;
+  }
   const trackerRole = typeof thread.role === 'string' ? thread.role.trim() : '';
   const trackerMode = typeof thread.mode === 'string' ? thread.mode.trim() : '';
   const trackerRoleIdentity = trackerRole || (provenanceKind === 'native_subagent' ? trackerMode : '');
-  if (provenanceKind === 'omx_adapted' && !trackerRoleIdentity) {
+  if ((provenanceKind === 'omx_adapted' || provenanceKind === 'omx_team') && !trackerRoleIdentity) {
     return `${agentRole} tracker thread ${threadId} has role=missing, expected ${agentRole}`;
   }
   if (trackerRoleIdentity && trackerRoleIdentity !== agentRole) {

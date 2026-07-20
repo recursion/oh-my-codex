@@ -13,12 +13,13 @@ export const SUBAGENT_TRACKING_SCHEMA_VERSION = 1;
 export const DEFAULT_SUBAGENT_ACTIVE_WINDOW_MS = 120_000;
 export const OMX_ADAPTED_PROVENANCE = 'omx_adapted';
 export const NATIVE_SUBAGENT_PROVENANCE = 'native_subagent';
+export const OMX_TEAM_PROVENANCE = 'omx_team';
 
 export type SubagentAvailabilityStatus = 'available' | 'closed' | 'unavailable';
 
 export interface TrackedSubagentThread {
   thread_id: string;
-  kind: 'leader' | 'subagent';
+  kind: 'leader' | 'subagent' | 'team_worker';
   first_seen_at: string;
   last_seen_at: string;
   completed_at?: string;
@@ -64,7 +65,7 @@ export interface RecordSubagentTurnInput {
   laneId?: string;
   scope?: string;
   agentNickname?: string;
-  kind?: 'leader' | 'subagent';
+  kind?: 'leader' | 'subagent' | 'team_worker';
   leaderThreadId?: string;
   completed?: boolean;
   completionSource?: string;
@@ -286,7 +287,7 @@ export function normalizeSubagentTrackingState(input: unknown): SubagentTracking
       const normalizedThreadId =
         typeof candidate.thread_id === 'string' && candidate.thread_id.trim().length > 0 ? candidate.thread_id.trim() : threadId.trim();
       if (!normalizedThreadId) continue;
-      const kind = candidate.kind === 'leader' ? 'leader' : 'subagent';
+      const kind = candidate.kind === 'leader' ? 'leader' : candidate.kind === 'team_worker' ? 'team_worker' : 'subagent';
       const firstSeenAt =
         typeof candidate.first_seen_at === 'string' && candidate.first_seen_at.trim().length > 0
           ? candidate.first_seen_at
@@ -1193,26 +1194,27 @@ export function recordSubagentTurn(state: SubagentTrackingState, input: RecordSu
     threads: {},
   };
 
-  const requestedKind = input.kind === 'leader' || input.kind === 'subagent' ? input.kind : undefined;
+  const requestedKind = input.kind === 'leader' || input.kind === 'subagent' || input.kind === 'team_worker' ? input.kind : undefined;
   const requestedLeaderThreadId = input.leaderThreadId?.trim();
   const existingThread = existingSession.threads[threadId];
-  const existingKind = existingThread?.kind === 'leader' || existingThread?.kind === 'subagent' ? existingThread.kind : undefined;
+  const existingKind = existingThread?.kind === 'leader' || existingThread?.kind === 'subagent' || existingThread?.kind === 'team_worker' ? existingThread.kind : undefined;
   const existingLeaderThreadId = existingSession.leader_thread_id?.trim();
   // `leader_thread_id` is the session's top-level leader boundary.  A native
   // subagent can itself be the immediate parent of a nested native role, but
   // that must not reclassify known subagent evidence as the session leader.
   const requestedLeaderThread = requestedLeaderThreadId ? existingSession.threads[requestedLeaderThreadId] : undefined;
-  const requestedLeaderWouldReclassifySubagent = requestedLeaderThread?.kind === 'subagent';
+  const requestedLeaderWouldReclassifySubagent = requestedLeaderThread?.kind === 'subagent' || requestedLeaderThread?.kind === 'team_worker';
   const requestedSessionLeaderThreadId = requestedLeaderWouldReclassifySubagent ? undefined : requestedLeaderThreadId;
-  const preserveExistingSubagent = existingKind === 'subagent' && requestedKind !== 'subagent';
-  const preserveKnownLeader = requestedKind === 'subagent' && (existingKind === 'leader' || existingLeaderThreadId === threadId);
+  const requestedWorkerKind = requestedKind === 'subagent' || requestedKind === 'team_worker';
+  const preserveExistingSubagent = (existingKind === 'subagent' || existingKind === 'team_worker') && !requestedWorkerKind;
+  const preserveKnownLeader = requestedWorkerKind && (existingKind === 'leader' || existingLeaderThreadId === threadId);
   const leaderThreadId = preserveKnownLeader
     ? existingLeaderThreadId || threadId
-    : existingLeaderThreadId || requestedSessionLeaderThreadId || (requestedKind === 'subagent' || preserveExistingSubagent ? undefined : threadId);
+    : existingLeaderThreadId || requestedSessionLeaderThreadId || (requestedWorkerKind || preserveExistingSubagent ? undefined : threadId);
   const kind = preserveKnownLeader
     ? 'leader'
-    : requestedKind === 'leader' && existingKind === 'subagent'
-      ? 'subagent'
+    : requestedKind === 'leader' && (existingKind === 'subagent' || existingKind === 'team_worker')
+      ? existingKind
       : (requestedKind ?? (threadId === leaderThreadId ? 'leader' : (existingKind ?? 'subagent')));
   const requestedStatus = normalizeSubagentStatus(input.status);
   const preservedStatus = normalizeSubagentStatus(existingThread?.status);

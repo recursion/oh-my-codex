@@ -1,18 +1,22 @@
 # Ralplan Consensus Gate Contract
 
-The `ralplan -> ultragoal` transition requires durable Architect and Critic approval evidence from native subagent lanes. Advisory lanes such as Scholastic do not replace this gate.
+The `ralplan -> ultragoal` transition requires durable Architect and Critic approval evidence from preferred native subagent lanes or the explicit attached-tmux OMX Team fallback. Advisory lanes such as Scholastic do not replace this gate.
 
 ## Required review artifact fields
 
 Each review artifact used by the gate must include:
 
 - `agent_role`: `architect` or `critic`
-- `provenance_kind`: `native_subagent` from a routing-capable surface; `omx_adapted` is rejected on the documented Codex 0.144.5 boundary
+- `provenance_kind`: `native_subagent` from a routing-capable surface, or `omx_team` from the validated attached-tmux fallback; `omx_adapted` remains rejected
 - `session_id`: the current transition session id, unless supplied by the transition context
 - `thread_id`: the native subagent thread id for that review lane
 - `tracker_path`: `.omx/state/subagent-tracking.json`
 
-The Architect and Critic reviews must approve in order and must refer to distinct native subagent threads.
+The Architect and Critic reviews must approve in order and must refer to distinct tracker lanes of the same truthful provenance type.
+
+## Typed OMX Team fallback
+
+When native `agent_type` routing is unavailable, attached tmux may use explicitly installed `architect` and `critic` Team roles. Architect must complete before the Critic task is created. Results are structured JSON approval envelopes bound to the current Ralplan session and the SHA-256 digest of every exact planning input. `omx ralplan team-consensus record` validates Team manifests, task ownership, exact worker/task roles, completion, result schema, session, input digest, distinct lanes, and strict ordering before it records `kind:"team_worker"`, `provenance_kind:"omx_team"` entries through the tracker API. Team is never relabeled as native.
 
 ## Unsupported adapted provenance
 

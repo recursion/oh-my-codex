@@ -284,7 +284,7 @@ function getNativeSubagentRoutingInstructions(): string {
   return [
     "When the native surface exposes `agent_type` role routing, set `agent_type` to an installed OMX role and never omit it for OMX work.",
     "On that routing-capable surface, use the most specific installed role; reserve `executor` for generic implementation work.",
-    "When it reports `role_routing_unavailable`, do not fabricate `agent_type`; before Ralplan planning, state, HUD, runtime, or delegation work, run `omx ralplan preflight --json` and stop on `unsupported_documented_leader_proof`. Never fake the role via a prompt label or infer authority from session/thread/pointer/transcript/cwd state.",
+    "When it reports `role_routing_unavailable`, do not fabricate `agent_type`; before Ralplan work run `omx ralplan preflight --json`. Stop on `unsupported_documented_leader_proof`; an attached-tmux `omx_team` result authorizes only sequential installed Architect then Critic Team lanes recorded by `omx ralplan team-consensus record`. Never relabel Team as native or infer authority from prompt/session text.",
     "For `spawn_agent`, set `fork_turns` to `none`; never use `all` or a positive turn count; make the prompt self-contained.",
   ].join("\n");
 }
