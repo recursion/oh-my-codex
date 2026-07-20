@@ -18,6 +18,7 @@ import TOML from "@iarna/toml";
 const TEST_CODEX_PROBES = {
   codexFeaturesProbe: () => null,
   codexVersionProbe: () => null,
+  installMode: "legacy" as const,
 } satisfies Parameters<typeof setup>[0];
 
 const EXPECTED_PROJECT_GITIGNORE = [

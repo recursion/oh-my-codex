@@ -449,16 +449,12 @@ function resolvePinnedCodexExecutable(
   const pathValue = env.PATH ?? env.Path ?? '';
   const observed: string[] = [];
   const seenPathEntries = new Set<string>();
+  let candidateCount = 0;
 
   for (const entry of streamPathEntries(pathValue, deadline, platform)) {
     if (Date.now() >= deadline) throw versionProbeDeadlineError();
     const pathEntry = resolve(cwd, entry || '.');
     if (seenPathEntries.has(pathEntry)) continue;
-    if (seenPathEntries.size === CODEX_VERSION_PROBE_CANDIDATE_BUDGET) {
-      throw new Error(
-        `Codex version resolution exceeded the ${CODEX_VERSION_PROBE_CANDIDATE_BUDGET}-candidate PATH budget`,
-      );
-    }
     seenPathEntries.add(pathEntry);
 
 
@@ -488,6 +484,13 @@ function resolvePinnedCodexExecutable(
       break;
     }
     if (!selected) continue;
+
+    if (candidateCount === CODEX_VERSION_PROBE_CANDIDATE_BUDGET) {
+      throw new Error(
+        `Codex version resolution exceeded the ${CODEX_VERSION_PROBE_CANDIDATE_BUDGET}-candidate PATH budget`,
+      );
+    }
+    candidateCount += 1;
 
     const { executable, before } = selected;
     if (before.kind === 'dangling') {

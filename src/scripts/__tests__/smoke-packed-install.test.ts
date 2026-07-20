@@ -586,6 +586,26 @@ test('packed lifecycle deduplicates repeated PATH entries before enforcing the c
   }
 });
 
+test('packed lifecycle ignores non-candidate PATH entries before enforcing the candidate budget', async () => {
+  if (process.platform === 'win32') return;
+  const root = await mkdtemp(join(tmpdir(), 'omx-codex-path-non-candidates-'));
+  const emptyDirs = Array.from({ length: 40 }, (_value, index) => join(root, `empty-${index}`));
+  const pinnedDir = join(root, 'pinned');
+  try {
+    await Promise.all([...emptyDirs, pinnedDir].map((dir) => mkdir(dir, { recursive: true })));
+    const pinned = join(pinnedDir, 'codex');
+    await writeFile(pinned, '#!/bin/sh\nprintf \'%s\\n\' \'codex-cli 0.142.5\'\n');
+    await chmod(pinned, 0o755);
+
+    assert.equal(
+      probeCodexVersion(root, { PATH: [...emptyDirs, pinnedDir].join(delimiter) }),
+      'codex-cli 0.142.5',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('packed lifecycle accepts only the exact stable pinned Codex version output', async () => {
   if (process.platform === 'win32') return;
   const root = await mkdtemp(join(tmpdir(), 'omx-codex-version-'));
@@ -1251,11 +1271,12 @@ test('packed install helpers freeze installed runtime and declaration reasoning 
 test('packed install retains authenticated native-anchor and exec launcher contracts', async () => {
   const hookSource = await readFile(join(process.cwd(), 'src/scripts/codex-native-hook.ts'), 'utf8');
   const cliSource = await readFile(join(process.cwd(), 'src/cli/index.ts'), 'utf8');
-  assert.match(hookSource, /isVerifiedPluginLauncherClaim/);
+  assert.match(hookSource, /hasVerifiedPluginLaunchClaim/);
   assert.match(hookSource, /classifyNativeTranscriptProvenance/);
   assert.match(hookSource, /native-pretooluse-transcript/);
   assert.match(hookSource, /signNativeLeaderAttestation/);
-  assert.match(cliSource, /execWithOverlay[\s\S]+OMX_CODEX_LAUNCH_ID[\s\S]+buildHudRuntimeEnv\(\{ sessionId/);
+  assert.match(cliSource, /authorizeCodexLaunchEnv[\s\S]+OMX_CODEX_LAUNCH_ID[\s\S]+OMX_CODEX_LAUNCH_TOKEN_ENV[\s\S]+issueNativeLaunchAuthorization/);
+  assert.match(cliSource, /execWithOverlay[\s\S]+authorizeCodexLaunchEnv\(cwd, sessionId, \{[\s\S]+buildHudRuntimeEnv\(\{ sessionId/);
 });
 
 test('packed install contract requires canonical/plugin Team skill parity and text', async () => {

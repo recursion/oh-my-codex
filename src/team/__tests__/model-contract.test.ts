@@ -225,10 +225,12 @@ describe('team model contract', () => {
   });
 
   it('maps worker roles to default reasoning effort tiers', () => {
-    assert.equal(resolveAgentReasoningEffort('explore'), 'low');
-    assert.equal(resolveAgentReasoningEffort('executor'), 'medium');
-    assert.equal(resolveAgentReasoningEffort('architect'), 'xhigh');
-    assert.equal(resolveAgentReasoningEffort('does-not-exist'), undefined);
+    withIsolatedDefaultModelEnv(() => {
+      assert.equal(resolveAgentReasoningEffort('explore'), 'low');
+      assert.equal(resolveAgentReasoningEffort('executor'), 'medium');
+      assert.equal(resolveAgentReasoningEffort('architect'), 'xhigh');
+      assert.equal(resolveAgentReasoningEffort('does-not-exist'), undefined);
+    });
   });
 
   it('maps worker roles through configured per-agent reasoning overrides and invalid fallback', async () => {

@@ -74,6 +74,10 @@ import * as tmuxSessionModule from '../tmux-session.js';
 import { OMX_ENTRY_PATH_ENV, OMX_STARTUP_CWD_ENV } from '../../utils/paths.js';
 import { readExactPaneProof, readExactPaneProofSync } from '../exact-pane.js';
 
+delete process.env.OMX_ROOT;
+delete process.env.OMX_STATE_ROOT;
+process.env.CODEX_HOME = join(tmpdir(), `omx-tmux-session-test-codex-home-${process.pid}`);
+
 const fsMutable = fs as typeof fs & {
   existsSync: typeof fs.existsSync;
   fsyncSync: typeof fs.fsyncSync;
@@ -5648,6 +5652,8 @@ esac
   it('rejects standalone HUD PID reuse before native resize', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-standalone-hud-pid-reuse-'));
     const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const previousWslDistro = process.env.WSL_DISTRO_NAME;
+    const previousWslInterop = process.env.WSL_INTEROP;
     try {
       await withMockTmuxFixture(
         'omx-tmux-standalone-hud-pid-reuse-',
@@ -5676,6 +5682,8 @@ case "$1" in
 esac
 `,
         async ({ logPath }) => {
+          delete process.env.WSL_DISTRO_NAME;
+          delete process.env.WSL_INTEROP;
           Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
           assert.throws(() => restoreStandaloneHudPane('%11', cwd), /tmux pane identity changed: %44/);
           const commands = await readFile(logPath, 'utf-8');
@@ -5684,6 +5692,10 @@ esac
       );
     } finally {
       if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      if (typeof previousWslDistro === 'string') process.env.WSL_DISTRO_NAME = previousWslDistro;
+      else delete process.env.WSL_DISTRO_NAME;
+      if (typeof previousWslInterop === 'string') process.env.WSL_INTEROP = previousWslInterop;
+      else delete process.env.WSL_INTEROP;
       await rm(cwd, { recursive: true, force: true });
     }
   });

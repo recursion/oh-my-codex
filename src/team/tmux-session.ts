@@ -2078,6 +2078,10 @@ export function isWsl2(): boolean {
   if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
     return true;
   }
+  // Native Windows has no /proc filesystem. Avoid consulting the host kernel
+  // when a Windows runtime is detected (including native-Windows test
+  // harnesses executed from a WSL host).
+  if (process.platform === 'win32') return false;
   try {
     const version = readFileSync('/proc/version', 'utf-8');
     return /microsoft/i.test(version);

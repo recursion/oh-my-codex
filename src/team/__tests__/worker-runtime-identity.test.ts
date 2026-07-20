@@ -19,6 +19,10 @@ import {
 import { scaleUp } from '../scaling.js';
 import { resolveTeamLowComplexityDefaultModel } from '../model-contract.js';
 
+delete process.env.OMX_ROOT;
+delete process.env.OMX_STATE_ROOT;
+process.env.CODEX_HOME = join(tmpdir(), `omx-worker-runtime-identity-test-codex-home-${process.pid}`);
+
 function expectedLowComplexityModel(codexHomeOverride?: string): string {
   return resolveTeamLowComplexityDefaultModel(codexHomeOverride);
 }

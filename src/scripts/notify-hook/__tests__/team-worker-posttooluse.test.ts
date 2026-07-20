@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -45,7 +45,26 @@ const successPayload = {
   tool_use_id: 'tool-1',
 };
 
-describe('handleTeamWorkerPostToolUseSuccess', () => {
+const originalStateRoots = {
+  OMX_ROOT: process.env.OMX_ROOT,
+  OMX_STATE_ROOT: process.env.OMX_STATE_ROOT,
+  OMX_TEAM_STATE_ROOT: process.env.OMX_TEAM_STATE_ROOT,
+};
+
+beforeEach(() => {
+  delete process.env.OMX_ROOT;
+  delete process.env.OMX_STATE_ROOT;
+  delete process.env.OMX_TEAM_STATE_ROOT;
+});
+
+afterEach(() => {
+  for (const [key, value] of Object.entries(originalStateRoots)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
+describe('handleTeamWorkerPostToolUseSuccess', { concurrency: false }, () => {
   it('creates a safe worker checkpoint, ledger entries, leader signal, and dedupe marker', async () => {
     const fixture = await initWorkerFixture();
     await writeFile(join(fixture.cwd, 'feature.txt'), 'feature\n', 'utf-8');
@@ -138,9 +157,8 @@ describe('handleTeamWorkerPostToolUseSuccess', () => {
 
   it('unstages checkpointable paths when checkpoint commit fails after staging', async () => {
     const fixture = await initWorkerFixture();
-    const hookPath = join(fixture.cwd, '.git', 'hooks', 'prepare-commit-msg');
-    await writeFile(hookPath, '#!/bin/sh\nexit 42\n', 'utf-8');
-    await chmod(hookPath, 0o755);
+    execFileSync('git', ['config', 'commit.gpgsign', 'true'], { cwd: fixture.cwd, stdio: 'ignore' });
+    execFileSync('git', ['config', 'gpg.program', 'omx-definitely-missing-gpg-program'], { cwd: fixture.cwd, stdio: 'ignore' });
     await writeFile(join(fixture.cwd, 'commit-fail.txt'), 'must not remain staged\n', 'utf-8');
 
     const result = await handleTeamWorkerPostToolUseSuccess(successPayload, fixture.cwd, fixture.env);

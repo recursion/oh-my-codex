@@ -34,6 +34,9 @@ import { buildWorkerProcessLaunchSpec } from '../tmux-session.js';
 
 
 delete process.env.OMX_TEAM_STATE_ROOT;
+delete process.env.OMX_ROOT;
+delete process.env.OMX_STATE_ROOT;
+process.env.CODEX_HOME = join(tmpdir(), `omx-scaling-test-codex-home-${process.pid}`);
 process.env.OMX_RUNTIME_BRIDGE = '0';
 
 async function initCommittedGitRepo(cwd: string): Promise<void> {

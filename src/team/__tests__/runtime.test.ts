@@ -663,29 +663,33 @@ afterEach(() => {
 
 describe('runtime', () => {
   it('resolveWorkerLaunchArgsFromEnv injects low-complexity default model when missing', () => {
-    const args = resolveWorkerLaunchArgsFromEnv(
-      { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
-      'explore',
-    );
-    assert.deepEqual(args, ['--no-alt-screen', '--model', expectedLowComplexityModel()]);
+    withIsolatedDefaultModelEnv(() => {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+        'explore',
+      );
+      assert.deepEqual(args, ['--no-alt-screen', '--model', expectedLowComplexityModel()]);
+    });
   });
 
   it('keeps an explicit direct policy authoritative while preserving inherited model and role reasoning', () => {
-    const args = resolveWorkerLaunchArgsFromEnv(
-      {
-        OMX_TEAM_WORKER_LAUNCH_ARGS: '--sandbox=workspace-write',
-        [TEAM_WORKER_INHERITED_MODEL_ENV]: 'leader-model',
-      },
-      'executor',
-      undefined,
-      'medium',
-      'codex',
-    );
-    assert.deepEqual(args, [
-      '--sandbox', 'workspace-write',
-      '-c', 'model_reasoning_effort="medium"',
-      '--model', 'leader-model',
-    ]);
+    withIsolatedDefaultModelEnv(() => {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        {
+          OMX_TEAM_WORKER_LAUNCH_ARGS: '--sandbox=workspace-write',
+          [TEAM_WORKER_INHERITED_MODEL_ENV]: 'leader-model',
+        },
+        'executor',
+        undefined,
+        'medium',
+        'codex',
+      );
+      assert.deepEqual(args, [
+        '--sandbox', 'workspace-write',
+        '-c', 'model_reasoning_effort="medium"',
+        '--model', 'leader-model',
+      ]);
+    });
 
   });
 
@@ -1262,21 +1266,25 @@ require('fs').writeFileSync(process.env.OMX_NON_CODEX_CAPTURE, process.argv.slic
   });
 
   it('resolveWorkerLaunchArgsFromEnv uses inherited leader model for all agent types', () => {
-    const args = resolveWorkerLaunchArgsFromEnv(
-      { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
-      'executor',
-      'gpt-4.1',
-    );
-    assert.deepEqual(args, ['--no-alt-screen', '--model', 'gpt-4.1']);
+    withIsolatedDefaultModelEnv(() => {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+        'executor',
+        'gpt-4.1',
+      );
+      assert.deepEqual(args, ['--no-alt-screen', '--model', 'gpt-4.1']);
+    });
   });
 
   it('resolveWorkerLaunchArgsFromEnv uses inherited leader model over low-complexity default', () => {
-    const args = resolveWorkerLaunchArgsFromEnv(
-      { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
-      'explore',
-      'gpt-4.1',
-    );
-    assert.deepEqual(args, ['--no-alt-screen', '--model', 'gpt-4.1']);
+    withIsolatedDefaultModelEnv(() => {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+        'explore',
+        'gpt-4.1',
+      );
+      assert.deepEqual(args, ['--no-alt-screen', '--model', 'gpt-4.1']);
+    });
   });
 
   it('resolveWorkerLaunchArgsFromEnv prefers explicit env model over inherited leader model', () => {
@@ -1321,14 +1329,16 @@ require('fs').writeFileSync(process.env.OMX_NON_CODEX_CAPTURE, process.argv.slic
     const originalLog = console.log;
     console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
     try {
-      const args = resolveWorkerLaunchArgsFromEnv(
-        { OMX_TEAM_WORKER_LAUNCH_ARGS: '-c model_reasoning_effort=\"high\" --no-alt-screen' },
-        'explore',
-      );
-      assert.deepEqual(
-        args,
-        ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', expectedLowComplexityModel()],
-      );
+      withIsolatedDefaultModelEnv(() => {
+        const args = resolveWorkerLaunchArgsFromEnv(
+          { OMX_TEAM_WORKER_LAUNCH_ARGS: '-c model_reasoning_effort=\"high\" --no-alt-screen' },
+          'explore',
+        );
+        assert.deepEqual(
+          args,
+          ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', expectedLowComplexityModel()],
+        );
+      });
     } finally {
       console.log = originalLog;
     }
@@ -1340,17 +1350,19 @@ require('fs').writeFileSync(process.env.OMX_NON_CODEX_CAPTURE, process.argv.slic
     const originalLog = console.log;
     console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
     try {
-      const args = resolveWorkerLaunchArgsFromEnv(
-        {
-          OMX_TEAM_WORKER_CLI: 'claude',
-          OMX_TEAM_WORKER_LAUNCH_ARGS: '-c model_reasoning_effort="high" --no-alt-screen',
-        },
-        'explore',
-      );
-      assert.deepEqual(
-        args,
-        ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', expectedLowComplexityModel()],
-      );
+      withIsolatedDefaultModelEnv(() => {
+        const args = resolveWorkerLaunchArgsFromEnv(
+          {
+            OMX_TEAM_WORKER_CLI: 'claude',
+            OMX_TEAM_WORKER_LAUNCH_ARGS: '-c model_reasoning_effort="high" --no-alt-screen',
+          },
+          'explore',
+        );
+        assert.deepEqual(
+          args,
+          ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', expectedLowComplexityModel()],
+        );
+      });
     } finally {
       console.log = originalLog;
     }
@@ -1971,11 +1983,13 @@ esac
     const originalLog = console.log;
     console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
     try {
-      const args = resolveWorkerLaunchArgsFromEnv(
-        { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
-        'explore',
-      );
-      assert.deepEqual(args, ['--no-alt-screen', '--model', expectedLowComplexityModel()]);
+      withIsolatedDefaultModelEnv(() => {
+        const args = resolveWorkerLaunchArgsFromEnv(
+          { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+          'explore',
+        );
+        assert.deepEqual(args, ['--no-alt-screen', '--model', expectedLowComplexityModel()]);
+      });
     } finally {
       console.log = originalLog;
     }

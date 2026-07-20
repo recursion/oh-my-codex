@@ -15,12 +15,14 @@ const originalFrontierEnv = process.env.OMX_DEFAULT_FRONTIER_MODEL;
 const originalStandardEnv = process.env.OMX_DEFAULT_STANDARD_MODEL;
 const originalSparkEnv = process.env.OMX_DEFAULT_SPARK_MODEL;
 const originalLegacySparkEnv = process.env.OMX_SPARK_MODEL;
+const originalCodexHome = process.env.CODEX_HOME;
 
 beforeEach(() => {
   delete process.env.OMX_DEFAULT_FRONTIER_MODEL;
   delete process.env.OMX_DEFAULT_STANDARD_MODEL;
   delete process.env.OMX_DEFAULT_SPARK_MODEL;
   delete process.env.OMX_SPARK_MODEL;
+  process.env.CODEX_HOME = join(tmpdir(), `omx-agents-model-table-test-codex-home-${process.pid}`);
 });
 
 afterEach(() => {
@@ -43,6 +45,11 @@ afterEach(() => {
     process.env.OMX_SPARK_MODEL = originalLegacySparkEnv;
   } else {
     delete process.env.OMX_SPARK_MODEL;
+  }
+  if (typeof originalCodexHome === 'string') {
+    process.env.CODEX_HOME = originalCodexHome;
+  } else {
+    delete process.env.CODEX_HOME;
   }
 });
 
