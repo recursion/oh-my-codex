@@ -3629,7 +3629,7 @@ function buildNativeUnknownRolePreToolUseOutput(
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       additionalContext:
-        "Use an installed OMX role for native agent_type/agent_role dispatch. When the surface reports role_routing_unavailable, do not fabricate agent_type; run `omx ralplan preflight --json` before Ralplan planning, state, HUD, runtime, or delegation work and stop on `unsupported_documented_leader_proof` by default. The sole exception is a reviewed, explicitly amended plan with a current acknowledged authenticated adapted-provenance policy that passes `omx ralplan preflight --adapted-provenance --json`.",
+        "Use an installed OMX role for native agent_type/agent_role dispatch. When the surface reports role_routing_unavailable, do not fabricate agent_type; run `omx ralplan preflight --json` before Ralplan planning, state, HUD, runtime, or delegation work and stop on `unsupported_documented_leader_proof` by default. The sole exception is a reviewed, explicitly amended plan with a current acknowledged authenticated adapted-provenance policy that passes `omx ralplan preflight --adapted-provenance --json`. An attached-tmux `omx_team` preflight result is a separate exception authorizing only sequential installed Architect then Critic Team lanes recorded by `omx ralplan team-consensus record`; Team is never relabeled native or adapted.",
     },
   };
 }

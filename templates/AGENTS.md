@@ -87,7 +87,7 @@ Native context rule: set `fork_turns="none"` and provide a self-contained prompt
 
 <model_routing>
 Match role to task shape: `explore` for repo lookup, `researcher` for official docs/reference gathering, `dependency-expert` for SDK/package decisions, `executor` for implementation, `debugger` for root cause, `architect`/`critic` for high-complexity review. Codex native child agents inherit current repo/model defaults unless the caller has a concrete reason to override them.
-When a native surface reports `role_routing_unavailable`, do not fabricate `agent_type`: the adapted role path is unavailable and cannot apply the requested role TOML model or reasoning effort. Run `omx ralplan preflight --json` for Ralplan and stop on `unsupported_documented_leader_proof`; use an OMX Team worker or another role-aware launcher when exact routing is required.
+When a native surface reports `role_routing_unavailable`, do not fabricate `agent_type`: the adapted role path is unavailable and cannot apply the requested role TOML model or reasoning effort. Run `omx ralplan preflight --json` for Ralplan and stop on `unsupported_documented_leader_proof`; an attached-tmux `omx_team` result authorizes only sequential installed Architect then Critic Team lanes recorded by `omx ralplan team-consensus record`.
 </model_routing>
 
 <specialist_routing>

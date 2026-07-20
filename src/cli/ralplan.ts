@@ -10,6 +10,7 @@ import {
   readValidAdaptedProvenancePolicy,
 } from '../ralplan/adapted-provenance-policy.js';
 import { isCodex01445AdaptedProvenanceGrantCommand } from '../ralplan/documented-leader-preflight.js';
+import { digestRalplanInputs, hasInstalledRalplanTeamRoles, recordTeamRalplanConsensusFromState } from '../ralplan/team-consensus.js';
 import { hasVerifiedPluginLaunchClaim } from '../subagents/native-anchor-auth.js';
 import { ensureLeaderAndRecordIntent, hasLeaderSubagentCollision, hasVerifiedLeaderAttestation, type PendingRoleIntent, readSubagentTrackingStateStrict, resolveInstalledRoleName } from '../subagents/tracker.js';
 
@@ -19,6 +20,8 @@ export const RALPLAN_HELP = `omx ralplan - RALPLAN consensus support commands
 
 Usage:
   omx ralplan preflight [--adapted-provenance] [--json]
+  omx ralplan team-consensus digest --input <path> [--input <path> ...] [--json]
+  omx ralplan team-consensus record --session <id> --input <path> [--input <path> ...] --architect-team <name> --architect-task <id> --critic-team <name> --critic-task <id> [--json]
   omx ralplan adapted-provenance grant --plan <repo-relative-plan-path> --acknowledge ${ADAPTED_PROVENANCE_ACKNOWLEDGEMENT} [--ttl-ms <n>] [--json]
   omx ralplan role-intent write --role <role> --parent-thread <id> [--session <id>] [--ttl-ms <n>] [--json]
 `;
@@ -67,6 +70,10 @@ export interface RalplanCommandDependencies {
   ensureLeaderAndRecordIntent?: typeof ensureLeaderAndRecordIntent;
   generateCorrelationToken?: () => string;
   cancelRalplan?: (cwd?: string) => Promise<void>;
+  hasInstalledRalplanTeamRoles?: typeof hasInstalledRalplanTeamRoles;
+  recordTeamRalplanConsensusFromState?: typeof recordTeamRalplanConsensusFromState;
+  digestRalplanInputs?: typeof digestRalplanInputs;
+  isAttachedTmux?: () => boolean;
 }
 
 export async function ralplanCommand(args: string[], deps: RalplanCommandDependencies = {}): Promise<void> {
@@ -97,8 +104,34 @@ export async function ralplanCommand(args: string[], deps: RalplanCommandDepende
       else stdout(`ralplan preflight authenticated: session=${scope.sessionId} leader-thread=${leader}`);
       return;
     }
+    if (!requireAdaptedProvenance
+      && (deps.isAttachedTmux ?? (() => Boolean(process.env.TMUX)))()
+      && (deps.hasInstalledRalplanTeamRoles ?? hasInstalledRalplanTeamRoles)(cwd, process.env.CODEX_HOME)) {
+      const capability = { ok: true, provenance_kind: 'omx_team', native_preferred: true, sequence: ['architect-review', 'critic-review'] };
+      if (json) stdout(JSON.stringify(capability));
+      else stdout('ralplan preflight: authenticated native/adapted routing unavailable; typed OMX Team Architect -> Critic fallback is available');
+      return;
+    }
     await (deps.cancelRalplan ?? ((value?: string) => cancelMode('ralplan', value)))(cwd);
     emitRoleIntentFailure('unsupported_documented_leader_proof', json, stdout, stderr);
+    return;
+  }
+  if (args[0] === 'team-consensus' && args[1] === 'digest') {
+    const { inputPaths, json } = parseTeamConsensusDigestArgs(args.slice(2));
+    const inputDigest = await (deps.digestRalplanInputs ?? digestRalplanInputs)(inputPaths);
+    stdout(json ? JSON.stringify({ ok: true, input_digest: inputDigest }) : inputDigest);
+    return;
+  }
+  if (args[0] === 'team-consensus' && args[1] === 'record') {
+    const parsed = parseTeamConsensusRecordArgs(args.slice(2));
+    const cwd = (deps.cwd ?? process.cwd)();
+    const evidence = await (deps.recordTeamRalplanConsensusFromState ?? recordTeamRalplanConsensusFromState)({
+      cwd, sessionId: parsed.sessionId, inputPaths: parsed.inputPaths,
+      architect: { teamName: parsed.architectTeam, taskId: parsed.architectTask },
+      critic: { teamName: parsed.criticTeam, taskId: parsed.criticTask },
+      codexHome: process.env.CODEX_HOME,
+    });
+    stdout(parsed.json ? JSON.stringify({ ok: true, evidence }) : 'recorded tracker-backed OMX Team Ralplan consensus');
     return;
   }
   if (args[0] === 'adapted-provenance' && args[1] === 'grant') {
@@ -247,6 +280,38 @@ export async function ralplanCommand(args: string[], deps: RalplanCommandDepende
   };
   if (parsed.json) stdout(JSON.stringify(receipt));
   else stdout(`role-intent recorded: role=${intent.role} session=${intent.session_id} parent-thread=${intent.parent_thread_id} correlation-token=${intent.correlation_token} spawn-task-name=${spawnTaskName} expires-at=${intent.expires_at}`);
+}
+
+function parseTeamConsensusDigestArgs(args: string[]) {
+  const inputPaths: string[] = [];
+  let json = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--json') { json = true; continue; }
+    if (arg !== '--input') throw new Error(`Unknown team-consensus digest argument: ${arg}`);
+    const value = args[++index];
+    if (!value || value.startsWith('--')) throw new Error('Missing value after --input.');
+    inputPaths.push(value);
+  }
+  if (inputPaths.length === 0) throw new Error('Missing required --input.');
+  return { inputPaths, json };
+}
+
+function parseTeamConsensusRecordArgs(args: string[]) {
+  const values: Record<string, string> = {};
+  const inputPaths: string[] = [];
+  let json = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--json') { json = true; continue; }
+    if (!['--session', '--input', '--architect-team', '--architect-task', '--critic-team', '--critic-task'].includes(arg)) throw new Error(`Unknown team-consensus argument: ${arg}`);
+    const value = args[++index];
+    if (!value || value.startsWith('--')) throw new Error(`Missing value after ${arg}.`);
+    if (arg === '--input') inputPaths.push(value); else values[arg] = value;
+  }
+  for (const key of ['--session', '--architect-team', '--architect-task', '--critic-team', '--critic-task']) if (!values[key]) throw new Error(`Missing required ${key}.`);
+  if (inputPaths.length === 0) throw new Error('Missing required --input.');
+  return { sessionId: values['--session']!, inputPaths, architectTeam: values['--architect-team']!, architectTask: values['--architect-task']!, criticTeam: values['--critic-team']!, criticTask: values['--critic-task']!, json };
 }
 
 function parsePreflightArgs(args: string[]): ParsedPreflightArgs {

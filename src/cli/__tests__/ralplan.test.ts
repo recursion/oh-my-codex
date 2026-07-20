@@ -9,7 +9,7 @@ async function invoke(args: string[], deps: RalplanCommandDependencies = {}) {
   const previous = process.exitCode;
   try {
     process.exitCode = undefined;
-    await ralplanCommand(args, { ...deps, stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) });
+    await ralplanCommand(args, { isAttachedTmux: () => false, ...deps, stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) });
     return { stdout, stderr, exitCode: process.exitCode };
   } finally {
     process.exitCode = previous;

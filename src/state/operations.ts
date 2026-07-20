@@ -68,7 +68,7 @@ import {
   isUnsupportedNativeSubagentEvidenceForScope,
 } from '../leader/contract.js';
 import {
-  buildRalplanConsensusGateFromSources,
+  buildRalplanConsensusGateForCwd,
 } from '../ralplan/consensus-gate.js';
 
 
@@ -367,17 +367,18 @@ export function validateRalplanTerminalConsensus(
   options: { requireNativeSubagents?: boolean } = {},
 ): string | null {
   if (!isRalplanCompleteCloseoutAttempt(state)) return null;
-  if (stateContainsUnsupportedNativeSubagentEvidence(state, { cwd, sessionId })) {
-    return 'Cannot complete ralplan cleanly while native subagent support is unavailable; terminalize the workflow as blocked/cancelled/failed or restart in a runtime with working native subagents.';
-  }
   const stateSessionId = sessionId ?? optionalSessionId(state.session_id);
-  const gate = buildRalplanConsensusGateFromSources([
-    { source: 'state-write-ralplan-terminal', value: state, sessionId: stateSessionId },
-  ], {
-    cwd,
+  const gate = buildRalplanConsensusGateForCwd(cwd, {
+    artifacts: state,
     sessionId: stateSessionId,
     requireNativeSubagents: options.requireNativeSubagents === true,
   });
+  const teamFallback = gate.complete === true
+    && gate.ralplan_architect_review?.provenance_kind === 'omx_team'
+    && gate.ralplan_critic_review?.provenance_kind === 'omx_team';
+  if (stateContainsUnsupportedNativeSubagentEvidence(state, { cwd, sessionId }) && !teamFallback) {
+    return 'Cannot complete ralplan cleanly while native subagent support is unavailable; terminalize the workflow as blocked/cancelled/failed, use validated attached-tmux OMX Team consensus, or restart in a runtime with working native subagents.';
+  }
   if (gate.complete === true) {
     if (options.requireNativeSubagents === true) {
       state.ralplan_consensus_gate = {
@@ -389,7 +390,7 @@ export function validateRalplanTerminalConsensus(
   }
   const details = gate.blockedDetails?.length ? ` Details: ${gate.blockedDetails.join('; ')}.` : '';
   const evidenceDescription = options.requireNativeSubagents === true
-    ? 'tracker-backed native architect and critic consensus evidence'
+    ? 'tracker-backed typed architect and critic consensus evidence'
     : 'architect and critic consensus evidence';
   return `ralplan complete state requires ${evidenceDescription} (${gate.blockedReason ?? 'missing_consensus'}).${details}`;
 }

@@ -152,7 +152,7 @@ export const LEADER_CONDUCTOR_ROLE_ROUTING_DEGRADE_BLOCK = [
   'Native role routing is unavailable in this environment.',
   'Do not fabricate agent_type or use task-name carriers, markers, or prompt labels as authority.',
   'Before Ralplan planner, reviewer, HUD, runtime, or delegation work, run `omx ralplan preflight --json` and stop on `unsupported_documented_leader_proof` by default.',
-  'The sole exception is a reviewed, explicitly amended plan with a current acknowledged authenticated adapted-provenance policy that passes `omx ralplan preflight --adapted-provenance --json`.',
+  'The sole exception is a reviewed, explicitly amended plan with a current acknowledged authenticated adapted-provenance policy that passes `omx ralplan preflight --adapted-provenance --json`. An attached-tmux `omx_team` preflight result is a separate exception authorizing only sequential installed Architect then Critic Team lanes recorded by `omx ralplan team-consensus record`; Team is never relabeled native or adapted.',
   'Otherwise use a surface with installed typed agent_type routing or a reviewed alternative workflow.',
 ].join(' ');
 

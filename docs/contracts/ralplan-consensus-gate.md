@@ -3,14 +3,15 @@
 The `ralplan -> ultragoal` transition requires durable Architect and Critic
 approval evidence. Typed `native_subagent` lanes are the preferred proof.
 `omx_adapted` lanes are accepted only through the narrow authenticated fallback
-defined below; advisory lanes such as Scholastic never replace this gate.
+defined below. Attached-tmux `omx_team` lanes are accepted only through the
+separate tracker-backed Team validator; advisory lanes never replace this gate.
 
 ## Required review artifact fields
 
 Each Architect and Critic review must include:
 
 - `agent_role`: `architect` or `critic`
-- `provenance_kind`: `native_subagent`, or authenticated `omx_adapted`
+- `provenance_kind`: `native_subagent`, authenticated `omx_adapted`, or validated `omx_team`
 - `session_id`: the current transition session id, unless supplied by the
   transition context
 - `thread_id`: the native child thread id for that review lane
@@ -29,6 +30,18 @@ tracker receipt before verifying its signature.
 
 The reviews must approve in strict Architect-before-Critic order and use
 distinct completed tracker threads.
+
+## Typed OMX Team fallback
+
+When native routing and authenticated adapted provenance are unavailable,
+attached tmux may use explicitly installed `architect` and `critic` Team roles.
+Architect must complete before the Critic task is created. Each result is a
+versioned JSON approval envelope bound to the current Ralplan session and the
+SHA-256 digest of every exact planning input. `omx ralplan team-consensus
+record` validates Team manifests, ownership, worker/task roles, completion,
+session, digest, distinct lanes, and strict ordering before recording
+`kind:"team_worker"`, `provenance_kind:"omx_team"` through the tracker API.
+Team evidence is never relabeled as native or adapted evidence.
 
 ## Authenticated adapted provenance
 

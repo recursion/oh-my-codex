@@ -62,6 +62,16 @@ from `.omx/state/subagent-tracking.json` at
 reuse another lane's receipt. The durable consensus gate rejects an adapted
 review when either value is absent or differs from the signed tracker receipt.
 
+**Typed Team fallback:** On attached tmux, a normal preflight may instead return
+`ok:true` with `provenance_kind:"omx_team"`. This authorizes only sequential
+installed Architect then Critic Team tasks. Compute the exact planning digest
+with `omx ralplan team-consensus digest`, require versioned JSON approval
+envelopes bound to that digest and current session, create Critic only after
+Architect completes, then run `omx ralplan team-consensus record`. Generic or
+prompt-labeled workers, prose-only results, stale/cross-session inputs,
+unordered or incomplete work, and non-approvals remain rejected. Never relabel
+Team evidence as native or adapted provenance.
+
 3. **Architect** reviews for architectural soundness and must provide the strongest steelman antithesis, at least one real tradeoff tension, and (when possible) synthesis — **await completion before step 4**. Launch this as a subsequent role-specific `Architect` subagent and pass the full task statement, context snapshot, PRD/test-spec paths, and relevant prior findings; do not substitute an unvalidated reviewer identity or a short improvised reviewer prompt. In deliberate mode, Architect should explicitly flag principle violations.
 4. **Critic** evaluates against quality criteria — run only after step 3 completes. Launch this as a subsequent role-specific `Critic` subagent with the full task statement, context snapshot, PRD/test-spec paths, and the completed Architect review; do not ask the Architect subagent to perform the Critic gate and do not substitute an unvalidated reviewer identity or a short improvised reviewer prompt. Critic must enforce principle-option consistency, fair alternatives, risk mitigation clarity, testable acceptance criteria, and concrete verification steps. In deliberate mode, Critic must reject missing/weak pre-mortem or expanded test plan.
 5. **Re-review loop** (max 5 iterations): Any non-`APPROVE` Critic verdict (`ITERATE` or `REJECT`) MUST run the same full closed loop:
